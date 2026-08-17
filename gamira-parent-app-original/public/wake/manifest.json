@@ -1,0 +1,76 @@
+{
+  "bundle_version": 1,
+  "version": "20260817-150126",
+  "wake_word": "gamira",
+  "name": "gamira-20260817-150126",
+  "created_str": "2026-08-17 15:01",
+  "model": "20260817-150126/model.onnx",
+  "frontend": "20260817-150126/frontend.json",
+  "filterbank": "20260817-150126/mel_filterbank.f32",
+  "window": "20260817-150126/window.f32",
+  "parity": "20260817-150126/parity.json",
+  "filterbank_shape": [
+    80,
+    257
+  ],
+  "detector": {
+    "threshold": 0.942912,
+    "threshold_source": "sweep",
+    "raw_threshold": 0.5,
+    "release_threshold": 0.3,
+    "consecutive_hits": 2,
+    "refractory_period": 1.5,
+    "smoothing_window": 4
+  },
+  "vad": {
+    "enabled": true,
+    "min_rms_dbfs": -55.0,
+    "hangover_frames": 12
+  },
+  "adaptive_threshold": {
+    "enabled": true,
+    "max_boost": 0.15
+  },
+  "metrics": {
+    "auc": 0.94039,
+    "threshold": 0.9429,
+    "accuracy": 0.86306,
+    "precision": 0.90661,
+    "recall": 0.67415,
+    "f1": 0.77328,
+    "false_positive_rate": 0.03681,
+    "fpr_target_met": false,
+    "confusion_matrix": [
+      [
+        5103,
+        195
+      ],
+      [
+        915,
+        1893
+      ]
+    ],
+    "test_samples": 8106,
+    "frontend": {
+      "version": 2,
+      "sample_rate": 16000,
+      "n_mels": 80,
+      "n_fft": 512,
+      "hop_length": 160,
+      "win_length": 400,
+      "fmin": 60.0,
+      "fmax": 7800.0,
+      "n_frames": 151,
+      "center": false,
+      "power": 1.0,
+      "normalization": "pcen",
+      "pcen": {
+        "time_constant": 0.4,
+        "alpha": 0.98,
+        "delta": 2.0,
+        "r": 0.5,
+        "eps": 1e-06
+      }
+    }
+  }
+}

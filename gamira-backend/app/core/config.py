@@ -119,6 +119,13 @@ class Settings(BaseSettings):
     live_session_open_window_minutes: int = 1
     live_session_max_concurrent: int = 2
     live_sessions_per_hour: int = 20
+    # A session opened speculatively by the wake word, before it is sure. It
+    # expires quickly if nobody promotes it, and spends no hourly quota — the
+    # detector pre-connects far more often than a person actually speaks, and
+    # charging for the guesses would exhaust the limit in minutes. The
+    # concurrency cap is what stops a looping client minting forever.
+    live_provisional_ttl_seconds: int = 120
+    live_provisional_max_concurrent: int = 2
     ai_requests_per_hour: int = 60
     # How long a confirmation prompt stays answerable before it expires.
     ai_confirmation_ttl_seconds: int = 300

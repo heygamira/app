@@ -16,7 +16,18 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 
-from sqlalchemy import Date, Enum, Float, ForeignKey, Index, Integer, String, Text
+import sqlalchemy as sa
+from sqlalchemy import (
+    Boolean,
+    Date,
+    Enum,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import JSON
 
@@ -278,6 +289,14 @@ class LiveSession(UUIDPrimaryKey, Timestamps, Base):
     # Deliberately absent: the ephemeral token itself. It is returned once and
     # never stored, so a database read cannot open a voice session.
     token_fingerprint: Mapped[str | None] = mapped_column(String(32))
+    # Opened speculatively and not yet spoken into. The Parent App pre-connects
+    # while a wake word is still only *probably* a wake word, so that the socket
+    # is up by the time it is confirmed; most of those are never used. A
+    # provisional session gets a short expiry and does not spend the caller's
+    # hourly quota until `promote_live_session` says it became real.
+    provisional: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=sa.false()
+    )
     expires_at: Mapped[dt.datetime] = mapped_column(UtcDateTime(), index=True)
     last_seen_at: Mapped[dt.datetime | None] = mapped_column(UtcDateTime())
     closed_at: Mapped[dt.datetime | None] = mapped_column(UtcDateTime())

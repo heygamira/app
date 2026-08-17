@@ -25,6 +25,16 @@ export default defineConfig({
       '@': path.resolve(projectRoot, 'src'),
     },
   },
+  optimizeDeps: {
+    // onnxruntime-web finds its 13 MB WebAssembly binary with
+    // `new URL('...wasm', import.meta.url)`. Dependency pre-bundling rewrites
+    // that URL into `node_modules/.vite/deps/` but does not copy the binary
+    // there, so in development the dev server answers with index.html and the
+    // wake-word detector fails to start — in production only, where the build
+    // emits the file properly, it works. Excluding it keeps the import pointing
+    // at the real file in both.
+    exclude: ['onnxruntime-web'],
+  },
   server: {
     port: 5173,
     https,

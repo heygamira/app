@@ -122,6 +122,10 @@ class LiveSessionRequest(BaseModel):
     # Which cared-for person this session is about. Checked against the
     # caller's memberships; a senior in another family is a 404.
     senior_id: uuid.UUID | None = None
+    # Opened on a wake word the detector is not yet sure about, so the socket is
+    # ready if it turns out to be one. Expires in a couple of minutes and costs
+    # no hourly quota unless promoted.
+    provisional: bool = False
 
 
 class LiveToolDeclaration(BaseModel):
@@ -151,6 +155,9 @@ class LiveSessionOut(BaseModel):
     senior_id: uuid.UUID
     senior_name: str
     tools: list[str]
+    # True while this session is only a guess. It must be promoted before it is
+    # spoken into, or it expires on its own.
+    provisional: bool = False
 
 
 class ToolCallIn(BaseModel):

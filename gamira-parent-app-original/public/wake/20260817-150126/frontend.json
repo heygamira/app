@@ -1,0 +1,27 @@
+{
+  "version": 2,
+  "sample_rate": 16000,
+  "n_mels": 80,
+  "n_fft": 512,
+  "hop_length": 160,
+  "win_length": 400,
+  "fmin": 60.0,
+  "fmax": 7800.0,
+  "n_frames": 151,
+  "center": false,
+  "power": 1.0,
+  "normalization": "pcen",
+  "pcen": {
+    "time_constant": 0.4,
+    "alpha": 0.98,
+    "delta": 2.0,
+    "r": 0.5,
+    "eps": 1e-06,
+    "smoother": {
+      "b": 0.024689453048712014,
+      "zi": 0.9753105469512859,
+      "init": "constant",
+      "librosa": "0.11.0"
+    }
+  }
+}

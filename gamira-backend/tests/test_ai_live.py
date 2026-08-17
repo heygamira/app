@@ -15,6 +15,7 @@ from sqlalchemy import func, select
 
 from app.ai.persona import PERSONA_VERSION, SYSTEM_INSTRUCTION
 from app.ai.tools import PARENT_APP_TOOLS, tool_snapshot
+from app.core.config import get_settings
 from app.db.base import utcnow
 from app.jobs.types import JobType
 from app.models.ai import Conversation, LiveSession
@@ -80,6 +81,7 @@ async def test_the_permanent_key_is_never_returned(client, token_minter):
         "senior_id",
         "senior_name",
         "tools",
+        "provisional",
     }
 
 
@@ -358,3 +360,200 @@ async def test_the_senior_scope_is_derived_not_supplied(client, session):
     # Their own profile, not the family's first.
     assert body["senior_id"] == sunita_id
     assert body["senior_name"] == "Sunita"
+
+
+# --------------------------------------------------------------------------- #
+# Speculative sessions
+#
+# The Parent App's wake-word detector opens a session while the score still only
+# says "probably", so the socket is up by the time it says "definitely". Most of
+# those guesses are wrong. What these tests guard is that being wrong is cheap:
+# a guess must not spend the hourly allowance, must not lock the person out of
+# starting a conversation by hand, and must clean itself up.
+# --------------------------------------------------------------------------- #
+
+
+async def _start_provisional(client, family):
+    response = await client.post(
+        "/api/v1/ai/live-sessions", json={"provisional": True}, headers=family.headers()
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+async def test_a_provisional_session_expires_in_minutes_not_half_an_hour(client, session):
+    family = await create_family(client)
+    settings = get_settings()
+
+    body = await _start_provisional(client, family)
+
+    assert body["provisional"] is True
+    row = await session.get(LiveSession, uuid.UUID(body["session_id"]))
+    assert row.provisional is True
+    # Short enough that an abandoned guess releases its slot on its own.
+    assert row.expires_at <= utcnow() + dt.timedelta(
+        seconds=settings.live_provisional_ttl_seconds + 5
+    )
+    assert row.expires_at < utcnow() + dt.timedelta(
+        minutes=settings.live_session_ttl_minutes
+    )
+
+
+async def test_guesses_do_not_spend_the_hourly_allowance(client, session):
+    """The whole point: the detector pre-connects far more often than anyone speaks."""
+    family = await create_family(client)
+    settings = get_settings()
+
+    # Far more guesses than the hourly limit, each abandoned like a real one.
+    for _ in range(settings.live_sessions_per_hour + 5):
+        body = await _start_provisional(client, family)
+        await client.post(
+            f"/api/v1/ai/live-sessions/{body['session_id']}/close",
+            headers=family.headers(),
+        )
+
+    # A real conversation is still possible afterwards.
+    response = await client.post(
+        "/api/v1/ai/live-sessions", json={}, headers=family.headers()
+    )
+    assert response.status_code == 201
+    assert response.json()["provisional"] is False
+
+
+async def test_promoting_charges_the_allowance_and_extends_the_session(client, session):
+    family = await create_family(client)
+    settings = get_settings()
+
+    body = await _start_provisional(client, family)
+    before = await session.get(LiveSession, uuid.UUID(body["session_id"]))
+    short_expiry = before.expires_at
+
+    response = await client.post(
+        f"/api/v1/ai/live-sessions/{body['session_id']}/promote",
+        headers=family.headers(),
+    )
+    assert response.status_code == 200
+    assert response.json()["provisional"] is False
+    # No second credential: the browser already connected with the first one.
+    assert response.json()["token"] == ""
+
+    await session.refresh(before)
+    assert before.provisional is False
+    assert before.expires_at > short_expiry
+    assert before.expires_at > utcnow() + dt.timedelta(
+        minutes=settings.live_session_ttl_minutes - 1
+    )
+
+
+async def test_the_hourly_limit_still_bites_once_guesses_are_promoted(client, session):
+    """Pre-connecting must not become a way around the limit, only a way to defer it."""
+    family = await create_family(client)
+    settings = get_settings()
+
+    for _ in range(settings.live_sessions_per_hour):
+        body = await _start_provisional(client, family)
+        promoted = await client.post(
+            f"/api/v1/ai/live-sessions/{body['session_id']}/promote",
+            headers=family.headers(),
+        )
+        assert promoted.status_code == 200
+        await client.post(
+            f"/api/v1/ai/live-sessions/{body['session_id']}/close",
+            headers=family.headers(),
+        )
+
+    body = await _start_provisional(client, family)
+    refused = await client.post(
+        f"/api/v1/ai/live-sessions/{body['session_id']}/promote",
+        headers=family.headers(),
+    )
+    assert refused.status_code == 429
+
+
+async def test_a_runaway_detector_is_capped(client, session):
+    """A client stuck in a pre-connect loop must not mint tokens forever."""
+    family = await create_family(client)
+    limit = get_settings().live_provisional_max_concurrent
+
+    for _ in range(limit):
+        await _start_provisional(client, family)
+
+    response = await client.post(
+        "/api/v1/ai/live-sessions", json={"provisional": True}, headers=family.headers()
+    )
+    assert response.status_code == 429
+    assert response.json()["error"]["code"] == "too_many_live_sessions"
+
+
+async def test_an_open_guess_does_not_block_pressing_the_button(client, session):
+    """The two caps are separate, or speculation would break manual activation."""
+    family = await create_family(client)
+
+    for _ in range(get_settings().live_provisional_max_concurrent):
+        await _start_provisional(client, family)
+
+    response = await client.post(
+        "/api/v1/ai/live-sessions", json={}, headers=family.headers()
+    )
+    assert response.status_code == 201
+
+
+async def test_an_abandoned_guess_is_swept_away(client, session):
+    family = await create_family(client)
+    body = await _start_provisional(client, family)
+
+    row = await session.get(LiveSession, uuid.UUID(body["session_id"]))
+    row.expires_at = utcnow() - dt.timedelta(seconds=1)
+    await session.commit()
+
+    # The sweep runs before every limit check, so simply asking again does it.
+    await _start_provisional(client, family)
+
+    await session.refresh(row)
+    assert row.status is LiveSessionStatus.EXPIRED
+
+
+async def test_promoting_an_expired_guess_is_refused(client, session):
+    """Better a clear failure than a session the backend has stopped honouring."""
+    family = await create_family(client)
+    body = await _start_provisional(client, family)
+
+    row = await session.get(LiveSession, uuid.UUID(body["session_id"]))
+    row.expires_at = utcnow() - dt.timedelta(seconds=1)
+    await session.commit()
+
+    response = await client.post(
+        f"/api/v1/ai/live-sessions/{body['session_id']}/promote",
+        headers=family.headers(),
+    )
+    assert response.status_code == 409
+
+
+async def test_promoting_twice_charges_once(client, session):
+    """The client retries on a flaky network; a retry must not cost a second slot."""
+    family = await create_family(client)
+    body = await _start_provisional(client, family)
+
+    first = await client.post(
+        f"/api/v1/ai/live-sessions/{body['session_id']}/promote",
+        headers=family.headers(),
+    )
+    second = await client.post(
+        f"/api/v1/ai/live-sessions/{body['session_id']}/promote",
+        headers=family.headers(),
+    )
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert second.json()["provisional"] is False
+
+
+async def test_a_guess_cannot_be_promoted_by_somebody_else(client, session):
+    family = await create_family(client)
+    body = await _start_provisional(client, family)
+
+    other = await create_family(client, owner="another-owner")
+    response = await client.post(
+        f"/api/v1/ai/live-sessions/{body['session_id']}/promote",
+        headers=other.headers(),
+    )
+    assert response.status_code == 404

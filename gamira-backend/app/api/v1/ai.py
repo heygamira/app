@@ -55,6 +55,7 @@ from app.models.enums import (
     ConversationStatus,
     MessageRole,
 )
+from app.models.identity import SeniorProfile
 from app.models.jobs import BackgroundJob
 from app.schemas.ai import (
     AiDecisionOut,
@@ -328,7 +329,12 @@ async def create_live_session(
     senior, membership = await _live_scope(session, user=user, payload=payload)
 
     created = await live_service.create_live_session(
-        session, user=user, senior=senior, membership=membership, settings=settings
+        session,
+        user=user,
+        senior=senior,
+        membership=membership,
+        settings=settings,
+        provisional=payload.provisional,
     )
     await record_audit(
         session,
@@ -343,6 +349,7 @@ async def create_live_session(
             "model": created.session.model,
             "tools": len(created.session.tool_snapshot or []),
             "token": created.token.fingerprint,
+            "provisional": created.session.provisional,
         },
     )
     return LiveSessionOut(
@@ -351,11 +358,62 @@ async def create_live_session(
         token=created.token.token,
         model=created.token.model,
         api_version=created.token.api_version,
-        expires_at=created.token.expires_at,
+        expires_at=created.session.expires_at,
         connect_before=created.token.open_before,
         senior_id=senior.id,
         senior_name=senior.preferred_name,
         tools=sorted(snapshot_names(created.session.tool_snapshot)),
+        provisional=created.session.provisional,
+    )
+
+
+@router.post("/live-sessions/{session_id}/promote", response_model=LiveSessionOut)
+async def promote_live_session(
+    session_id: uuid.UUID,
+    session: SessionDep,
+    user: CurrentUser,
+    settings: SettingsDep,
+) -> LiveSessionOut:
+    """A speculative session turned out to be a real one.
+
+    The Parent App opens a session as soon as the wake-word score says
+    "probably", and calls this once it says "definitely". That is what removes
+    the token mint and the WebSocket handshake from the gap between saying
+    "Gamira" and being answered.
+
+    The token is not reissued: the browser already holds it and has already
+    connected with it. This only converts the *backend's* record, extends the
+    expiry to the full session lifetime, and charges the hourly quota now that
+    there is a real conversation to charge for.
+    """
+    live_session = await _owned_live_session(session, session_id=session_id, user=user)
+    promoted = await live_service.promote_live_session(
+        session, live_session=live_session, settings=settings
+    )
+    await record_audit(
+        session,
+        action="ai.live_session.promote",
+        actor_user_id=user.id,
+        target_type="live_session",
+        target_id=promoted.id,
+        family_id=promoted.family_id,
+        metadata={"model": promoted.model},
+    )
+    senior = await session.get(SeniorProfile, promoted.senior_profile_id)
+    return LiveSessionOut(
+        session_id=promoted.id,
+        conversation_id=promoted.conversation_id,
+        # Already spent and already used to connect; there is nothing to hand
+        # back and nothing here that could re-open a session.
+        token="",
+        model=promoted.model,
+        api_version=promoted.api_version,
+        expires_at=promoted.expires_at,
+        connect_before=promoted.expires_at,
+        senior_id=promoted.senior_profile_id,
+        senior_name=senior.preferred_name if senior else "",
+        tools=sorted(snapshot_names(promoted.tool_snapshot)),
+        provisional=promoted.provisional,
     )
 
 
@@ -480,8 +538,6 @@ async def _live_scope(
         return await resolve_senior(
             session, user_id=user.id, senior_id=payload.senior_id
         )
-
-    from app.models.identity import SeniorProfile
 
     memberships = await active_memberships(session, user.id)
     if not memberships:

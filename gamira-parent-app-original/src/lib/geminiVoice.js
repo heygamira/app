@@ -34,6 +34,10 @@ const OUTPUT_RATE = 24_000;
 
 // Runs on the audio thread: batches mic samples and converts float -> PCM16.
 // Delivered as a blob URL so it needs no separate file in the build.
+//
+// Only used when this module opens the microphone itself. When the wake-word
+// engine is running it already owns a worklet on the same stream, and passing
+// its `audioSource` here shares that one rather than starting a second graph.
 export const CAPTURE_WORKLET = `
 class PCMCapture extends AudioWorkletProcessor {
   constructor() {
@@ -74,6 +78,15 @@ class PCMCapture extends AudioWorkletProcessor {
 }
 registerProcessor('pcm-capture', PCMCapture);
 `;
+
+function floatToPcm16(input) {
+  const pcm = new Int16Array(input.length);
+  for (let i = 0; i < input.length; i++) {
+    const s = Math.max(-1, Math.min(1, input[i]));
+    pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+  return pcm;
+}
 
 export function bytesToBase64(buffer) {
   const bytes = new Uint8Array(buffer);
@@ -131,7 +144,8 @@ export function extractFunctionCalls(message) {
  * progress arrives through onStatus.
  *
  * @param {object} opts
- * @param {(() => Promise<object>) | null} [opts.createSession]  asks the backend for a session + token
+ * @param {((opts: {provisional: boolean}) => Promise<object>) | null} [opts.createSession]
+ *        asks the backend for a session + token
  * @param {(sessionId: string, calls: Array<object>) => Promise<object>} [opts.sendToolCalls]
  * @param {(name: string, args: object) => Promise<object>} [opts.dispatchClientTool]
  * @param {(request: object) => void} [opts.onConfirmationRequired]
@@ -142,6 +156,17 @@ export function extractFunctionCalls(message) {
  * @param {(u: object) => void} [opts.onUsage]       cumulative token usage for this session
  * @param {(info: object) => void} [opts.onSession]  the backend session, once created
  * @param {(e: Error) => void} [opts.onError]
+ * @param {MediaStream} [opts.stream]         an already-open microphone to borrow
+ * @param {AudioContext} [opts.captureCtx]    an already-running capture context to borrow
+ * @param {AudioContext} [opts.playbackCtx]   an already-running playback context to borrow
+ * @param {{subscribe: (fn: (chunk: Float32Array) => void) => (() => void)}} [opts.audioSource]
+ *        an existing mic tap, in place of building a second worklet
+ * @param {boolean} [opts.provisional]  open this session speculatively; it does
+ *        not count against the hourly quota until `promote` is called
+ * @param {boolean} [opts.autoStream]   start sending audio as soon as the socket
+ *        opens. False keeps the session connected but silent until
+ *        `beginStreaming()` — which is how the wake word pre-connects.
+ * @param {() => void} [opts.onOpen]    the socket reached a usable state
  * @returns {{stop: () => void, resolveConfirmation: (decisionId: string, response: object) => void}}
  */
 export function startVoiceSession({
@@ -156,17 +181,38 @@ export function startVoiceSession({
   onUsage = () => {},
   onSession = () => {},
   onError = () => {},
+  onOpen = () => {},
+  stream: borrowedStream = null,
+  captureCtx: borrowedCaptureCtx = null,
+  playbackCtx: borrowedPlaybackCtx = null,
+  audioSource = null,
+  provisional = false,
+  autoStream = true,
 } = {}) {
   let stopped = false;
   let session = null;
-  let stream = null;
-  let captureCtx = null;
-  let playbackCtx = null;
+  let stream = borrowedStream;
+  let captureCtx = borrowedCaptureCtx;
+  let playbackCtx = borrowedPlaybackCtx;
   let workletUrl = null;
   let sourceNode = null;
   let workletNode = null;
   let sinkNode = null;
   let backendSessionId = null;
+  let unsubscribeAudio = null;
+
+  // What this session built and must therefore tear down. Anything borrowed
+  // belongs to the wake-word engine and outlives the conversation — closing it
+  // would take the microphone away from the thing that listens for the next one.
+  const owned = {
+    stream: !borrowedStream,
+    captureCtx: !borrowedCaptureCtx,
+    playbackCtx: !borrowedPlaybackCtx,
+  };
+
+  // Audio captured before the socket was ready, flushed the moment it opens.
+  let pending = [];
+  let streaming = autoStream;
 
   // Scheduled playback buffers, so an interrupt can cut them off mid-flight.
   let queued = [];
@@ -202,12 +248,15 @@ export function startVoiceSession({
     session = null;
     stopQueued();
     awaitingConfirmation.clear();
+    pending = [];
+    try { unsubscribeAudio?.(); } catch { /* ignore */ }
+    unsubscribeAudio = null;
     try { workletNode?.disconnect(); } catch { /* ignore */ }
     try { sinkNode?.disconnect(); } catch { /* ignore */ }
     try { sourceNode?.disconnect(); } catch { /* ignore */ }
-    stream?.getTracks().forEach((track) => track.stop());
-    try { captureCtx?.close(); } catch { /* ignore */ }
-    try { playbackCtx?.close(); } catch { /* ignore */ }
+    if (owned.stream) stream?.getTracks().forEach((track) => track.stop());
+    if (owned.captureCtx) { try { captureCtx?.close(); } catch { /* ignore */ } }
+    if (owned.playbackCtx) { try { playbackCtx?.close(); } catch { /* ignore */ } }
     if (workletUrl) URL.revokeObjectURL(workletUrl);
     workletUrl = null;
   };
@@ -239,6 +288,64 @@ export function startVoiceSession({
       body: JSON.stringify(payload),
       keepalive: true,
     }).catch(() => {});
+  };
+
+  // ~10 seconds at 50 ms a chunk. A socket that has not opened by then is not
+  // going to, and the buffer must not grow without limit either way.
+  const MAX_PENDING = 200;
+
+  const sendNow = (pcm, rate) => {
+    session.sendRealtimeInput({
+      audio: { data: bytesToBase64(pcm.buffer), mimeType: `audio/pcm;rate=${rate}` },
+    });
+  };
+
+  /**
+   * Send one chunk of PCM16 upstream, hold it, or drop it.
+   *
+   * Three cases, and the difference between them matters:
+   *
+   * - **Drop** while a tool call is resolving or a confirmation dialog is on
+   *   screen. The model must not hear the room, take another turn, and ask for
+   *   the same thing again while the person is still reading the first one.
+   *   Holding this audio would be worse than losing it: it would arrive later,
+   *   out of context.
+   * - **Hold** while the socket is still opening. The person has already
+   *   started their sentence — "Gamira, did I take my medicine?" is one breath,
+   *   and the question half lands during the handshake.
+   * - **Drop** while this session is speculative and unconfirmed. Not lost: the
+   *   wake-word engine's ring buffer holds it, and replays it on confirmation.
+   *   Buffering here as well would send those seconds twice.
+   */
+  const sendAudio = (pcm, rate) => {
+    if (stopped || !pcm.length) return;
+    if (!micLive()) return;
+    if (!streaming) return;
+
+    if (!session || !opened) {
+      pending.push(pcm);
+      if (pending.length > MAX_PENDING) pending.shift();
+      return;
+    }
+    try {
+      sendNow(pcm, rate);
+    } catch (err) {
+      fail(err);
+    }
+  };
+
+  const flushPending = (rate) => {
+    if (!session || !opened || !streaming || !pending.length) return;
+    const held = pending;
+    pending = [];
+    for (const pcm of held) {
+      try {
+        sendNow(pcm, rate);
+      } catch (err) {
+        fail(err);
+        return;
+      }
+    }
   };
 
   const play = (base64) => {
@@ -391,6 +498,8 @@ export function startVoiceSession({
     }
   };
 
+  let inputRate = 16_000;
+
   const handle = {
     stop() {
       if (stopped) return;
@@ -399,6 +508,35 @@ export function startVoiceSession({
       onStatus('closed');
       return sessionId;
     },
+
+    /**
+     * Start sending audio on a session opened with `autoStream: false`.
+     *
+     * Everything buffered since the socket opened goes first, so a speculative
+     * connection loses nothing: from the model's point of view the person
+     * simply started talking, and it never hears the room before that.
+     */
+    beginStreaming() {
+      if (stopped || streaming) return;
+      streaming = true;
+      if (!opened) return; // onopen will flush and announce
+      flushPending(inputRate);
+      if (micLive()) onStatus('listening');
+    },
+
+    /**
+     * Put audio in front of everything captured since. Used to replay the
+     * wake-word engine's ring buffer, which holds the moments before this
+     * session existed at all — the wake word itself and whatever came with it.
+     *
+     * Call this before `beginStreaming`, which is what actually sends it.
+     */
+    prependAudio(pcm) {
+      if (stopped || !pcm?.length) return;
+      pending.unshift(pcm);
+    },
+
+    get streaming() { return streaming; },
 
     /**
      * A person answered a confirmation. Send the outcome to the model.
@@ -430,7 +568,7 @@ export function startVoiceSession({
         throw new Error('Gamira voice was started without a session source.');
       }
 
-      const created = await createSession();
+      const created = await createSession({ provisional });
       const token = created?.token;
       const model = created?.model;
       const apiVersion = created?.api_version || created?.apiVersion;
@@ -441,28 +579,33 @@ export function startVoiceSession({
       onSession(created);
       if (stopped) return;
 
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          // Without echo cancellation the mic hears the speaker and Gemini
-          // interrupts itself in a loop.
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      });
-      if (stopped) return;
+      // Borrowed where the wake-word engine already opened one. That removes
+      // the permission check, the device open and two context resumes from the
+      // path between saying "Gamira" and being heard.
+      if (!stream) {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            channelCount: 1,
+            // Without echo cancellation the mic hears the speaker and Gemini
+            // interrupts itself in a loop.
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
+        if (stopped) return;
+      }
 
       // 16 kHz is what the API wants natively, but a browser may hand back a
       // different rate. Whatever we actually get is declared in the mime type
       // and resampled server-side, so there is no resampling to do here.
-      captureCtx = new AudioContext({ sampleRate: 16_000 });
-      playbackCtx = new AudioContext({ sampleRate: OUTPUT_RATE });
+      if (!captureCtx) captureCtx = new AudioContext({ sampleRate: 16_000 });
+      if (!playbackCtx) playbackCtx = new AudioContext({ sampleRate: OUTPUT_RATE });
       await captureCtx.resume();
       await playbackCtx.resume();
       if (stopped) return;
 
-      const inputRate = Math.round(captureCtx.sampleRate);
+      inputRate = Math.round(captureCtx.sampleRate);
       const { GoogleGenAI, Modality } = await import('@google/genai');
       if (stopped) return;
 
@@ -483,7 +626,17 @@ export function startVoiceSession({
           outputAudioTranscription: {},
         },
         callbacks: {
-          onopen: () => { opened = true; onStatus('listening'); },
+          onopen: () => {
+            opened = true;
+            onOpen();
+            // A session opened speculatively stays connected and silent until
+            // the wake word is actually confirmed, so it must not announce
+            // itself as listening — nothing is being sent yet.
+            if (streaming) {
+              flushPending(inputRate);
+              onStatus('listening');
+            }
+          },
           onmessage: (message) => {
             if (message.usageMetadata) reportUsage(model, message.usageMetadata);
 
@@ -543,42 +696,38 @@ export function startVoiceSession({
       });
       if (stopped) return;
 
-      // Mic -> worklet -> Live API
-      workletUrl = URL.createObjectURL(
-        new Blob([CAPTURE_WORKLET], { type: 'application/javascript' })
-      );
-      await captureCtx.audioWorklet.addModule(workletUrl);
-      if (stopped) return;
+      // Mic -> Live API. `sendAudio` decides whether each chunk goes out now,
+      // is held for a socket that has not opened, or is dropped because a
+      // confirmation dialog is on screen.
+      if (audioSource) {
+        // The wake-word engine already taps this stream; a second worklet on
+        // the same graph would only duplicate the work.
+        unsubscribeAudio = audioSource.subscribe((chunk) => {
+          sendAudio(floatToPcm16(chunk), inputRate);
+        });
+      } else {
+        workletUrl = URL.createObjectURL(
+          new Blob([CAPTURE_WORKLET], { type: 'application/javascript' })
+        );
+        await captureCtx.audioWorklet.addModule(workletUrl);
+        if (stopped) return;
 
-      sourceNode = captureCtx.createMediaStreamSource(stream);
-      workletNode = new AudioWorkletNode(captureCtx, 'pcm-capture');
-      workletNode.port.onmessage = (event) => {
-        if (stopped || !session) return;
-        // While a tool call is being resolved — and especially while a
-        // confirmation dialog is on screen — the microphone stops feeding the
-        // model. Otherwise it hears the room, takes another turn, and asks for
-        // the same thing again while the person is still reading the first one.
-        if (!micLive()) return;
-        try {
-          session.sendRealtimeInput({
-            audio: {
-              data: bytesToBase64(event.data),
-              mimeType: `audio/pcm;rate=${inputRate}`,
-            },
-          });
-        } catch (err) {
-          fail(err);
-        }
-      };
-      sourceNode.connect(workletNode);
+        sourceNode = captureCtx.createMediaStreamSource(stream);
+        workletNode = new AudioWorkletNode(captureCtx, 'pcm-capture');
+        workletNode.port.onmessage = (event) => {
+          if (stopped) return;
+          sendAudio(new Int16Array(event.data), inputRate);
+        };
+        sourceNode.connect(workletNode);
 
-      // The worklet produces no output, but Chrome only pulls from nodes that
-      // reach the destination. A muted gain node keeps the graph alive without
-      // routing the microphone back to the speakers.
-      sinkNode = captureCtx.createGain();
-      sinkNode.gain.value = 0;
-      workletNode.connect(sinkNode);
-      sinkNode.connect(captureCtx.destination);
+        // The worklet produces no output, but Chrome only pulls from nodes that
+        // reach the destination. A muted gain node keeps the graph alive without
+        // routing the microphone back to the speakers.
+        sinkNode = captureCtx.createGain();
+        sinkNode.gain.value = 0;
+        workletNode.connect(sinkNode);
+        sinkNode.connect(captureCtx.destination);
+      }
     } catch (err) {
       fail(err);
     }

@@ -307,12 +307,21 @@ async def create_live_session(
     settings: Settings | None = None,
     minter: LiveTokenMinter | None = None,
     now: dt.datetime | None = None,
+    provisional: bool = False,
 ) -> CreatedLiveSession:
     """Authorise, limit, mint and record. In that order.
 
     The token is minted last, after every check has passed, so a rejected
     request never costs a token — and never creates a session row that a
     failed mint would then have to clean up.
+
+    ``provisional`` opens the session speculatively. The Parent App's wake-word
+    detector pre-connects while the score says "probably", so the socket is
+    already up by the time it says "definitely" — which is the difference
+    between answering immediately and answering after a second and a half of
+    silence. Most of those guesses are wrong, so a provisional session is
+    cheap to abandon: it expires in a couple of minutes on its own and does not
+    spend the caller's hourly allowance until :func:`promote_live_session`.
     """
     settings = settings or get_settings()
     minter = minter or get_token_minter(settings)
@@ -332,7 +341,9 @@ async def create_live_session(
         )
 
     await expire_stale_sessions(db, now=now)
-    await _enforce_limits(db, user_id=user.id, settings=settings, now=now)
+    await _enforce_limits(
+        db, user_id=user.id, settings=settings, now=now, provisional=provisional
+    )
 
     model, _spec = resolve_model(settings.gemini_live_model)
     api_version = settings.gemini_live_api_version or _spec["api_version"]
@@ -384,8 +395,16 @@ async def create_live_session(
         tool_snapshot=snapshot,
         # The fingerprint, never the token.
         token_fingerprint=token.fingerprint,
-        # The backend session dies with the Live token, not after it.
-        expires_at=token.expires_at,
+        # The backend session dies with the Live token, not after it — except
+        # while provisional, when it dies much sooner so an abandoned guess
+        # releases its slot without anyone having to clean up after it.
+        expires_at=(
+            min(token.expires_at,
+                now + dt.timedelta(seconds=settings.live_provisional_ttl_seconds))
+            if provisional
+            else token.expires_at
+        ),
+        provisional=provisional,
         request_id=current_request_id() or None,
     )
     db.add(live_session)
@@ -398,7 +417,8 @@ async def create_live_session(
             "model": model,
             "api_version": api_version,
             "tools": len(snapshot),
-            "expires_at": token.expires_at.isoformat(),
+            "expires_at": live_session.expires_at.isoformat(),
+            "provisional": provisional,
             # Identifies the token in an audit trail without being one.
             "token": token.fingerprint,
         },
@@ -406,8 +426,83 @@ async def create_live_session(
     return CreatedLiveSession(session=live_session, token=token)
 
 
-async def _enforce_limits(
+async def promote_live_session(
+    db: AsyncSession,
+    *,
+    live_session: LiveSession,
+    settings: Settings | None = None,
+    now: dt.datetime | None = None,
+) -> LiveSession:
+    """A speculative session turned out to be real. Charge for it and extend it.
+
+    The hourly limit is applied *here* rather than at creation, so the quota
+    tracks conversations a person actually had. Checking it now also means a
+    caller cannot dodge the limit by always pre-connecting: the check simply
+    happens a few hundred milliseconds later.
+
+    Idempotent — a retried promote on an already-real session is a no-op, not a
+    second charge.
+    """
+    settings = settings or get_settings()
+    now = now or utcnow()
+
+    if not live_session.provisional:
+        return live_session
+    if not live_session.is_live(now):
+        raise RateLimited(
+            "That voice session expired before it could be used.",
+            code="live_session_expired",
+            status_code=409,
+        )
+
+    await _enforce_hourly_limit(
+        db, user_id=live_session.user_id, settings=settings, now=now
+    )
+
+    live_session.provisional = False
+    live_session.expires_at = now + dt.timedelta(
+        minutes=settings.live_session_ttl_minutes
+    )
+    live_session.last_seen_at = now
+    await db.flush()
+
+    logger.info(
+        "live_session_promoted",
+        extra={
+            "live_session_id": str(live_session.id),
+            "expires_at": live_session.expires_at.isoformat(),
+        },
+    )
+    return live_session
+
+
+async def _enforce_hourly_limit(
     db: AsyncSession, *, user_id: uuid.UUID, settings: Settings, now: dt.datetime
+) -> None:
+    """Real sessions started in the last hour. Guesses do not count."""
+    recent = int(
+        await db.scalar(
+            select(func.count())
+            .select_from(LiveSession)
+            .where(
+                LiveSession.user_id == user_id,
+                LiveSession.created_at >= now - dt.timedelta(hours=1),
+                LiveSession.provisional.is_(False),
+            )
+        )
+        or 0
+    )
+    if recent >= settings.live_sessions_per_hour:
+        raise RateLimited("Too many voice sessions in the last hour.")
+
+
+async def _enforce_limits(
+    db: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    settings: Settings,
+    now: dt.datetime,
+    provisional: bool = False,
 ) -> None:
     concurrent = int(
         await db.scalar(
@@ -417,29 +512,31 @@ async def _enforce_limits(
                 LiveSession.user_id == user_id,
                 LiveSession.status == LiveSessionStatus.ACTIVE,
                 LiveSession.expires_at > now,
+                LiveSession.provisional.is_(provisional),
             )
         )
         or 0
     )
-    if concurrent >= settings.live_session_max_concurrent:
+    # Provisional sessions have their own, separate cap. Sharing the real one
+    # would mean a single unconfirmed guess locks the person out of starting a
+    # conversation by hand — the exact opposite of what pre-connecting is for.
+    cap = (
+        settings.live_provisional_max_concurrent
+        if provisional
+        else settings.live_session_max_concurrent
+    )
+    if concurrent >= cap:
         raise RateLimited(
-            "A voice session is already open on another device.",
+            "Still opening a voice session — try again in a moment."
+            if provisional
+            else "A voice session is already open on another device.",
             code="too_many_live_sessions",
         )
 
-    recent = int(
-        await db.scalar(
-            select(func.count())
-            .select_from(LiveSession)
-            .where(
-                LiveSession.user_id == user_id,
-                LiveSession.created_at >= now - dt.timedelta(hours=1),
-            )
-        )
-        or 0
-    )
-    if recent >= settings.live_sessions_per_hour:
-        raise RateLimited("Too many voice sessions in the last hour.")
+    # A guess is not a conversation, so it does not spend the hourly allowance.
+    # `promote_live_session` charges for it if it becomes one.
+    if not provisional:
+        await _enforce_hourly_limit(db, user_id=user_id, settings=settings, now=now)
 
 
 async def expire_stale_sessions(
@@ -494,5 +591,6 @@ __all__ = [
     "create_live_session",
     "expire_stale_sessions",
     "get_token_minter",
+    "promote_live_session",
     "set_token_minter",
 ]

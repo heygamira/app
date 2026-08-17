@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { AlertCircle, Bell, Check, Pill, Settings as SettingsIcon } from 'lucide-react';
 import { useI18n, langCode } from '@/lib/i18n';
 import { useGeminiVoice } from '@/lib/useGeminiVoice';
+import { useWakeWord } from '@/lib/useWakeWord';
+import { getSettings } from '@/lib/userSettings';
 import { useSeniorCare } from '@/lib/useSeniorCare';
 import { doses as dosesApi, sos as sosApi } from '@/api/gamiraClient';
 import {
@@ -22,6 +24,7 @@ import GamiraSectionHeader from '@/components/gamira/GamiraSectionHeader';
 import GamiraMetricCard from '@/components/gamira/GamiraMetricCard';
 import GamiraSOSButton from '@/components/gamira/GamiraSOSButton';
 import VoiceConfirmDialog from '@/components/gamira/VoiceConfirmDialog';
+import WakeWordDebug from '@/components/gamira/WakeWordDebug';
 import ThemeToggle from '@/components/ThemeToggle';
 
 export default function Home() {
@@ -57,64 +60,42 @@ export default function Home() {
     // A dose recorded by voice should appear on this screen straight away.
     onMutation: () => reload({ quiet: true }),
   });
-  const { status: voiceStatus, active: voiceActive, start: startVoice, toggle: toggleVoice } = voice;
+  const {
+    status: voiceStatus,
+    active: voiceActive,
+    start: startVoice,
+    stop: stopVoice,
+  } = voice;
 
-  // Wake-word detection — auto-start the live session when the user says "Gamira".
-  // Only runs while idle: once a session is open it owns the microphone, and a
-  // second recognizer on the same input fights it for the device.
-  useEffect(() => {
-    if (voiceStatus !== 'idle') return;
-    // Prefixed on WebKit browsers, so it is not in the standard Window type.
-    const SpeechRecognition =
-      window.SpeechRecognition || /** @type {any} */ (window).webkitSpeechRecognition;
-    if (!SpeechRecognition) return;
+  // Hands-free activation. The engine holds the microphone and both audio
+  // contexts open, so by the time "Gamira" is confirmed the only thing left to
+  // do is start sending audio — see `useWakeWord` for how the Live API's
+  // startup cost is taken off that path entirely.
+  //
+  // Arming needs a user gesture (microphone permission, and both AudioContexts
+  // have to be resumed), so it happens on the first tap rather than on mount.
+  // Read once: this is a development switch, not a setting.
+  const [wakeDebug] = useState(
+    () => new URLSearchParams(window.location.search).get('wake') === 'debug'
+  );
+  const wake = useWakeWord(voice, {
+    lang: langCode[lang] || 'en-US',
+    telemetry: wakeDebug,
+  });
+  const { armed: wakeArmed, arm: armWake, resources: wakeResources } = wake;
 
-    let recognition = null;
-    let active = true;
-    const wakeWords = ['hey gamira', 'hello gamira', 'hi gamira', 'gamira'];
-
-    const start = () => {
-      if (!active) return;
-      recognition = new SpeechRecognition();
-      recognition.continuous = true;
-      recognition.interimResults = true;
-      recognition.lang = langCode[lang] || 'en-US';
-
-      recognition.onresult = (event) => {
-        const transcript = Array.from(event.results)
-          .map((r) => r[0].transcript)
-          .join(' ')
-          .toLowerCase();
-        if (wakeWords.some((w) => transcript.includes(w))) {
-          startVoice();
-        }
-      };
-
-      recognition.onend = () => {
-        if (active) {
-          try { recognition.start(); } catch { /* already starting */ }
-        }
-      };
-
-      recognition.onerror = (e) => {
-        if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
-          active = false;
-        }
-      };
-
-      try { recognition.start(); } catch { /* already started */ }
-    };
-
-    start();
-
-    return () => {
-      active = false;
-      if (recognition) {
-        recognition.onend = null;
-        try { recognition.stop(); } catch { /* ignore */ }
-      }
-    };
-  }, [lang, voiceStatus, startVoice]);
+  const handleVoiceButton = useCallback(() => {
+    // The tap that starts a conversation is also the gesture that lets Gamira
+    // listen for its name afterwards.
+    if (!wakeArmed && getSettings().wakeWord?.enabled !== false) armWake();
+    if (voiceActive || voiceStatus === 'connecting') {
+      stopVoice();
+      return;
+    }
+    // Borrow the detector's microphone when it already has one, so pressing the
+    // button does not open a second stream alongside it.
+    startVoice({ resources: wakeResources() });
+  }, [wakeArmed, armWake, voiceActive, voiceStatus, stopVoice, startVoice, wakeResources]);
 
   const voiceLabels = {
     idle: { label: t('voiceIdle'), sub: t('notListening'), button: t('tapToTalk') },
@@ -222,7 +203,7 @@ export default function Home() {
         <div className="flex flex-col items-center gap-3 py-4">
           <GamiraVoiceButton
             listening={voiceActive || voiceStatus === 'connecting'}
-            onClick={toggleVoice}
+            onClick={handleVoiceButton}
             label={labels.button}
           />
 
@@ -380,6 +361,8 @@ export default function Home() {
         onConfirm={voice.acceptConfirmation}
         onCancel={voice.rejectConfirmation}
       />
+
+      {wakeDebug && <WakeWordDebug wake={wake} />}
     </>
   );
 }

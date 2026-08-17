@@ -313,13 +313,28 @@ export const ai = {
    * connect_before, senior_id, senior_name, tools }`. The token is a one-use
    * ephemeral credential; the permanent Gemini key never reaches this app.
    *
-   * @param {{seniorId?: string}} [options]
+   * @param {{seniorId?: string, provisional?: boolean}} [options]
    */
-  createLiveSession: ({ seniorId } = {}) =>
+  createLiveSession: ({ seniorId, provisional = false } = {}) =>
     request('/ai/live-sessions', {
       method: 'POST',
-      body: seniorId ? { senior_id: seniorId } : {},
+      body: {
+        ...(seniorId ? { senior_id: seniorId } : {}),
+        ...(provisional ? { provisional: true } : {}),
+      },
     }),
+
+  /**
+   * Turn a speculative session into a real one.
+   *
+   * The wake word opens a session as soon as the score says "probably" so the
+   * connection is ready if it turns out to be one; this is called once it is
+   * confirmed. Until then the session costs no hourly quota and expires on its
+   * own. No new token is issued — the browser already connected with the one it
+   * has.
+   */
+  promoteLiveSession: (sessionId) =>
+    request(`/ai/live-sessions/${sessionId}/promote`, { method: 'POST' }),
 
   closeLiveSession: (sessionId) =>
     request(`/ai/live-sessions/${sessionId}/close`, { method: 'POST' }),

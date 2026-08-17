@@ -6,6 +6,18 @@ const defaults = {
   voice: 'Warm Female',
   speakingSpeed: 'Normal',
   family: [],
+  // Hands-free activation. `engine: 'auto'` prefers the trained on-device
+  // detector and falls back to the browser's speech recognition; pin it to
+  // 'onnx' or 'speech' to compare the two on a real device while the model is
+  // still being improved. `sensitivityOffset` shifts the detector's threshold:
+  // negative catches more and false-triggers more.
+  wakeWord: {
+    enabled: true,
+    engine: 'auto',
+    sensitivityOffset: 0,
+    chime: true,
+    preconnect: true,
+  },
   emergency: { primary: null, others: [], shareLocation: false },
   accessibility: { textSize: 'Standard', highContrast: false, reduceMotion: false, voiceAssistance: false },
 };

@@ -30,6 +30,12 @@ export function useGeminiVoice(handlers = {}) {
   const [confirmBusy, setConfirmBusy] = useState(false);
 
   const sessionRef = useRef(null);
+  // True while the open session is only a guess: the wake-word detector thought
+  // it heard something and started connecting, but has not confirmed it. Such a
+  // session must be completely invisible — no status change, no error if it
+  // fails, no microphone light in the UI — because most of them come to
+  // nothing and the person never said a word.
+  const provisionalRef = useRef(false);
   // Transcript chunks stream in mid-sentence, so they are appended — but each
   // turn has to start a fresh line or replies run together into one blob.
   const freshTurnRef = useRef(true);
@@ -42,10 +48,26 @@ export function useGeminiVoice(handlers = {}) {
     const sessionId = sessionRef.current?.sessionId;
     sessionRef.current?.stop();
     sessionRef.current = null;
+    provisionalRef.current = false;
     setStatus('idle');
     setError(null);
     setConfirmation(null);
     // Free the backend session's slot rather than waiting for it to expire.
+    if (sessionId) aiApi.closeLiveSession(sessionId).catch(() => {});
+  }, []);
+
+  /**
+   * Drop a speculative session that came to nothing.
+   *
+   * Silent by design: the person did not say anything, so there is nothing to
+   * tell them about. Only the backend slot needs releasing.
+   */
+  const abandon = useCallback(() => {
+    if (!provisionalRef.current) return;
+    const sessionId = sessionRef.current?.sessionId;
+    sessionRef.current?.stop();
+    sessionRef.current = null;
+    provisionalRef.current = false;
     if (sessionId) aiApi.closeLiveSession(sessionId).catch(() => {});
   }, []);
 
@@ -61,27 +83,55 @@ export function useGeminiVoice(handlers = {}) {
     [navigate]
   );
 
-  const start = useCallback(() => {
+  /**
+   * Open a session.
+   *
+   * @param {object} [options]
+   * @param {boolean} [options.provisional] connect speculatively and stay silent
+   *   until `commit` — the wake word's pre-connect path.
+   * @param {object} [options.resources] microphone and audio contexts the
+   *   wake-word engine already has open, so none of that is on the critical
+   *   path: `{ stream, captureCtx, playbackCtx, audioSource }`.
+   */
+  const start = useCallback((options = {}) => {
     if (sessionRef.current) return;
-    setError(null);
-    setTranscript('');
-    setConfirmation(null);
-    freshTurnRef.current = true;
+    const { provisional = false, resources = {} } = options;
+
+    provisionalRef.current = provisional;
+    if (!provisional) {
+      setError(null);
+      setTranscript('');
+      setConfirmation(null);
+      freshTurnRef.current = true;
+    }
 
     sessionRef.current = startVoiceSession({
-      createSession: () => aiApi.createLiveSession(),
+      createSession: (opts) => aiApi.createLiveSession(opts),
       sendToolCalls: (sessionId, calls) => aiApi.sendToolCalls(sessionId, calls),
       dispatchClientTool,
+      provisional,
+      autoStream: !provisional,
+      stream: resources.stream || null,
+      captureCtx: resources.captureCtx || null,
+      playbackCtx: resources.playbackCtx || null,
+      audioSource: resources.audioSource || null,
       onConfirmationRequired: (request) => setConfirmation(request),
       onStatus: (next) => {
         if (next === 'closed') {
+          const wasProvisional = provisionalRef.current;
           sessionRef.current = null;
+          provisionalRef.current = false;
+          if (wasProvisional) return; // a guess ending is not an event
           setConfirmation(null);
           // A failure reports onError first and then closes; don't let the
           // close wipe the error state the user still needs to see.
           setStatus((prev) => (prev === 'error' ? prev : 'idle'));
           return;
         }
+        // Nothing about an unconfirmed guess reaches the screen. Showing
+        // "connecting…" every time the detector half-heard something would be
+        // worse than the latency it exists to hide.
+        if (provisionalRef.current) return;
         setStatus(next);
       },
       onTranscript: (text) => {
@@ -94,13 +144,63 @@ export function useGeminiVoice(handlers = {}) {
       },
       onTurnEnd: () => { freshTurnRef.current = true; },
       onError: (err) => {
+        const wasProvisional = provisionalRef.current;
         sessionRef.current = null;
+        provisionalRef.current = false;
+        if (wasProvisional) {
+          // Nobody asked for this session, so nobody needs to hear that it
+          // failed. The next wake word takes the ordinary cold path.
+          // eslint-disable-next-line no-console
+          console.warn('Gamira voice: a speculative session failed', err);
+          return;
+        }
         setConfirmation(null);
         setError(err);
         setStatus('error');
       },
     });
   }, [dispatchClientTool]);
+
+  /**
+   * The wake word was confirmed: turn the speculative session into a real one.
+   *
+   * Audio starts flowing immediately and the backend is told afterwards. That
+   * ordering is the entire point — waiting for the promote round trip would put
+   * back a chunk of the delay this was built to remove. The session is already
+   * authorised and already connected; promoting is bookkeeping, not permission.
+   *
+   * @param {Int16Array} [prependAudio] the ring buffer's last moments, so the
+   *   wake word and anything said with it are not lost.
+   */
+  const commit = useCallback((prependAudio) => {
+    const session = sessionRef.current;
+    if (!session || !provisionalRef.current) return false;
+
+    provisionalRef.current = false;
+    setError(null);
+    setTranscript('');
+    setConfirmation(null);
+    freshTurnRef.current = true;
+    setStatus('connecting');
+
+    if (prependAudio?.length) session.prependAudio(prependAudio);
+    session.beginStreaming();
+
+    const sessionId = session.sessionId;
+    if (sessionId) {
+      aiApi.promoteLiveSession(sessionId).catch((err) => {
+        // The backend refused to charge for this session — over the hourly
+        // limit, or it expired before anyone spoke. It will stop honouring tool
+        // calls, so end it now rather than let it half-work.
+        if (sessionRef.current !== session) return;
+        sessionRef.current = null;
+        session.stop();
+        setError(err);
+        setStatus('error');
+      });
+    }
+    return true;
+  }, []);
 
   const toggle = useCallback(() => {
     if (sessionRef.current) stop();
@@ -183,5 +283,10 @@ export function useGeminiVoice(handlers = {}) {
     start,
     stop,
     toggle,
+    // The wake word's three-step path: connect on a maybe, keep or drop it once
+    // the detector is sure.
+    commit,
+    abandon,
+    get provisional() { return provisionalRef.current; },
   };
 }
