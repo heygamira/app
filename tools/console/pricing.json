@@ -1,0 +1,24 @@
+{
+  "_source": "https://ai.google.dev/gemini-api/docs/pricing",
+  "_checked": "2026-08-17",
+  "_note": "Paid-tier rates in US dollars per 1,000,000 tokens. The free tier costs nothing, so the console shows these as an estimate of what the same usage would cost if the key were billed. Prices change: re-check the source and update the date.",
+  "currency": "USD",
+  "per_tokens": 1000000,
+  "models": {
+    "gemini-2.5-flash-native-audio-preview-12-2025": {
+      "label": "2.5 Native Audio",
+      "input": { "TEXT": 0.5, "AUDIO": 3.0, "VIDEO": 3.0, "IMAGE": 3.0 },
+      "output": { "TEXT": 2.0, "AUDIO": 12.0 }
+    },
+    "gemini-3.1-flash-live-preview": {
+      "label": "3.1 Flash Live",
+      "input": { "TEXT": 0.75, "AUDIO": 3.0, "VIDEO": 1.0, "IMAGE": 1.0 },
+      "output": { "TEXT": 4.5, "AUDIO": 12.0 }
+    }
+  },
+  "fallback": {
+    "label": "unknown model",
+    "input": { "TEXT": 0.75, "AUDIO": 3.0, "VIDEO": 1.0, "IMAGE": 1.0 },
+    "output": { "TEXT": 4.5, "AUDIO": 12.0 }
+  }
+}

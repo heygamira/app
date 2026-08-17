@@ -1,0 +1,10 @@
+# Dependencies for the Gemini voice pieces:
+#   gemini_2_5_voice_chat.py   - terminal voice chat
+#   gemini_token_server.py     - ephemeral tokens for the React app
+#
+#   pip install -r requirements-voice.txt
+#
+# PyAudio is only needed for the terminal client. On Windows it installs from a
+# wheel; on Linux it needs portaudio19-dev first.
+google-genai>=1.68.0
+pyaudio>=0.2.14

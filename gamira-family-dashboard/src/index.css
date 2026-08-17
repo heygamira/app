@@ -1,0 +1,159 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Gamira Brand Palette */
+    --background: 210 40% 98%;
+    --foreground: 220 39% 11%;
+    --card: 0 0% 100%;
+    --card-foreground: 220 39% 11%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 39% 11%;
+    --primary: 221 83% 53%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 214 95% 93%;
+    --secondary-foreground: 221 83% 33%;
+    --muted: 210 40% 96%;
+    --muted-foreground: 220 9% 46%;
+    --accent: 214 95% 93%;
+    --accent-foreground: 221 83% 33%;
+    --success: 142 71% 45%;
+    --warning: 38 92% 50%;
+    --destructive: 0 84% 60%;
+    --border: 220 13% 91%;
+    --input: 220 13% 91%;
+    --ring: 221 83% 53%;
+    --radius: 1.25rem;
+
+    --font-heading: 'Inter', ui-sans-serif, system-ui, sans-serif;
+    --font-body: 'Inter', ui-sans-serif, system-ui, sans-serif;
+    --font-display: 'Inter', ui-sans-serif, system-ui, sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  }
+
+  .dark {
+    --background: 222 47% 7%;
+    --foreground: 210 40% 96%;
+    --card: 222 40% 11%;
+    --card-foreground: 210 40% 96%;
+    --popover: 222 40% 11%;
+    --popover-foreground: 210 40% 96%;
+    --primary: 217 91% 60%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 217 33% 17%;
+    --secondary-foreground: 210 40% 96%;
+    --muted: 217 33% 15%;
+    --muted-foreground: 215 20% 65%;
+    --accent: 217 33% 17%;
+    --accent-foreground: 210 40% 96%;
+    --success: 142 71% 45%;
+    --warning: 38 92% 50%;
+    --destructive: 0 70% 55%;
+    --border: 217 33% 20%;
+    --input: 217 33% 20%;
+    --ring: 217 91% 60%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  body {
+    @apply bg-background text-foreground font-body antialiased;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* No visible scrollbars. This is a phone screen: the scrollbar track eats a
+     column of an already narrow layout and is not something a finger uses.
+     Scrolling itself is untouched — wheel, trackpad, touch and keyboard all
+     still work. */
+  html,
+  body,
+  * {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+
+  ::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+    display: none;
+  }
+}
+
+@layer utilities {
+  .glass {
+    background: rgba(255, 255, 255, 0.72);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+  }
+
+  .glass-blue {
+    background: rgba(239, 246, 255, 0.6);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+  }
+
+  .shadow-soft {
+    box-shadow: 0 1px 2px rgba(17, 24, 39, 0.04), 0 4px 16px rgba(17, 24, 39, 0.04);
+  }
+
+  .shadow-card {
+    box-shadow: 0 1px 3px rgba(17, 24, 39, 0.05), 0 8px 24px rgba(17, 24, 39, 0.06);
+  }
+
+  .shadow-float {
+    box-shadow: 0 4px 12px rgba(37, 99, 235, 0.08), 0 16px 48px rgba(17, 24, 39, 0.08);
+  }
+
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  .gradient-gamira {
+    background: linear-gradient(135deg, #2563EB 0%, #3B82F6 50%, #60A5FA 100%);
+  }
+
+  .gradient-welcome {
+    background: linear-gradient(135deg, #EFF6FF 0%, #DBEAFE 45%, #BFDBFE 100%);
+  }
+
+  .dark .bg-white {
+    background-color: hsl(var(--card));
+  }
+  .dark .bg-white\/60 {
+    background-color: hsl(var(--card) / 0.6);
+  }
+  .dark .ring-white {
+    --tw-ring-color: hsl(var(--card));
+  }
+  .dark .glass {
+    background: rgba(17, 24, 39, 0.6);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+  }
+  .dark .glass-blue {
+    background: rgba(30, 41, 59, 0.5);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+  }
+}
+
+/* Time-of-day gradients (unlayered so Tailwind never tree-shakes the dynamic class) */
+.gradient-morning { background: linear-gradient(135deg, #FFF7ED 0%, #FFE4C4 45%, #DBEAFE 100%); }
+.gradient-afternoon { background: linear-gradient(135deg, #EFF6FF 0%, #DBEAFE 50%, #BFDBFE 100%); }
+.gradient-evening { background: linear-gradient(135deg, #FFF7ED 0%, #FED7AA 45%, #FECDD3 100%); }
+.gradient-night { background: linear-gradient(135deg, #E0E7FF 0%, #C7D2FE 50%, #DBEAFE 100%); }
+.dark .gradient-morning { background: linear-gradient(135deg, #3b2a1a 0%, #92400e 50%, #1e3a8a 100%); }
+.dark .gradient-afternoon { background: linear-gradient(135deg, #1e293b 0%, #1e3a8a 55%, #1d4ed8 100%); }
+.dark .gradient-evening { background: linear-gradient(135deg, #431407 0%, #b45309 50%, #9d174d 100%); }
+.dark .gradient-night { background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 50%, #312e81 100%); }

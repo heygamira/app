@@ -1,0 +1,48 @@
+# Local development services for Gamira.
+#
+#   docker compose up -d postgres     # database only, API run from the venv
+#   docker compose up -d              # database and API in containers
+#
+# These credentials are local-only. Staging and production read from Secret
+# Manager and never from this file.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: gamira-postgres
+    environment:
+      POSTGRES_USER: gamira
+      POSTGRES_PASSWORD: gamira
+      POSTGRES_DB: gamira
+      TZ: UTC
+    ports:
+      - "5432:5432"
+    volumes:
+      - gamira-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gamira -d gamira"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: ./gamira-backend
+    container_name: gamira-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      APP_ENV: local
+      # "postgres" is the compose service name, reachable inside the network.
+      DATABASE_URL: postgresql+asyncpg://gamira:gamira@postgres:5432/gamira
+      CORS_ORIGINS: http://localhost:5173,http://localhost:5174
+      AUTH_MODE: dev
+      LOG_FORMAT: console
+    ports:
+      - "8000:8000"
+    profiles:
+      - api
+
+volumes:
+  gamira-postgres-data:

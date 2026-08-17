@@ -1,0 +1,19 @@
+{
+  "name": "Gamira",
+  "short_name": "Gamira",
+  "description": "Daily care tracking, reminders and family connection.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F7F8FC",
+  "theme_color": "#5B3DF5",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

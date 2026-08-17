@@ -1,0 +1,50 @@
+const KEY = 'gamira-user-settings';
+
+const defaults = {
+  profile: { name: '', age: '', phone: '' },
+  language: 'English',
+  voice: 'Warm Female',
+  speakingSpeed: 'Normal',
+  family: [],
+  emergency: { primary: null, others: [], shareLocation: false },
+  accessibility: { textSize: 'Standard', highContrast: false, reduceMotion: false, voiceAssistance: false },
+};
+
+export function getSettings() {
+  try {
+    const raw = localStorage.getItem(KEY);
+    if (!raw) return { ...defaults };
+    const parsed = JSON.parse(raw);
+    return { ...defaults, ...parsed };
+  } catch {
+    return { ...defaults };
+  }
+}
+
+export function saveSettings(data) {
+  try {
+    localStorage.setItem(KEY, JSON.stringify(data));
+  } catch {
+    /* ignore */
+  }
+}
+
+export function updateSettings(patch) {
+  const next = { ...getSettings(), ...patch };
+  saveSettings(next);
+  return next;
+}
+
+const sizeMap = { Small: '15px', Standard: '16px', Large: '18px', 'Extra Large': '21px' };
+
+export function applyAccessibility() {
+  try {
+    const { accessibility } = getSettings();
+    const root = document.documentElement;
+    root.style.fontSize = sizeMap[accessibility?.textSize] || '16px';
+    root.classList.toggle('high-contrast', !!accessibility?.highContrast);
+    root.classList.toggle('reduce-motion', !!accessibility?.reduceMotion);
+  } catch {
+    /* ignore */
+  }
+}

@@ -1,0 +1,15 @@
+<!--
+  The Gamira mark: a lowercase "g" as a ring with a tail, over an open arc.
+
+  Drawn as strokes in `currentColor` so one file can be tinted per window —
+  violet for the apps, amber for the watch, green for the server console — and
+  stay crisp at 16px. The reference raster is
+  Gamira-Website-Clean/public/favicon-96.png; check any change against it.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="Gamira">
+  <g fill="none" stroke="currentColor" stroke-width="8.6" stroke-linecap="round">
+    <circle cx="48" cy="36" r="16.2" />
+    <path d="M58.4 23.6 Q62.6 20.4 65.4 16.8" />
+    <path d="M31.5 56.5 A17.6 17.6 0 1 0 64.5 56.5" />
+  </g>
+</svg>

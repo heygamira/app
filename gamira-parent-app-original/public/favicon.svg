@@ -1,0 +1,9 @@
+<!-- Gamira Parent App. The mark is shared: tools/assets/gamira-mark.svg -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="Gamira">
+  <rect width="100" height="100" rx="24" fill="#5B3DF5" />
+  <g fill="none" stroke="#ffffff" stroke-width="8.6" stroke-linecap="round">
+    <circle cx="48" cy="36" r="16.2" />
+    <path d="M58.4 23.6 Q62.6 20.4 65.4 16.8" />
+    <path d="M31.5 56.5 A17.6 17.6 0 1 0 64.5 56.5" />
+  </g>
+</svg>

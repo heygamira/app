@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Gamira Watch (simulated)</title>
+    <!-- The shared mark (tools/assets/gamira-mark.svg), amber so this window
+         is tellable from the apps and the console in the taskbar. -->
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='24' fill='%230b0f14'/%3E%3Cg fill='none' stroke='%23fbbf24' stroke-width='8.6' stroke-linecap='round'%3E%3Ccircle cx='48' cy='36' r='16.2'/%3E%3Cpath d='M58.4 23.6 Q62.6 20.4 65.4 16.8'/%3E%3Cpath d='M31.5 56.5 A17.6 17.6 0 1 0 64.5 56.5'/%3E%3C/g%3E%3C/svg%3E"
+    />
+    <style>
+      :root {
+        --bg: #0b0f14;
+        --card: #151b23;
+        --line: #232c37;
+        --text: #e8edf3;
+        --muted: #8b98a8;
+        --accent: #4ade80;
+        --warn: #fbbf24;
+        --danger: #f87171;
+      }
+      * { box-sizing: border-box; }
+      /* No visible scrollbars — a watch face has no room for one. Scrolling
+         still works with the wheel, trackpad or touch. */
+      * { scrollbar-width: none; -ms-overflow-style: none; }
+      ::-webkit-scrollbar { width: 0; height: 0; display: none; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 14px/1.4 "Segoe UI", system-ui, sans-serif;
+        padding: 12px;
+      }
+      header { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+      .mark { width: 22px; height: 22px; color: var(--warn); flex: none; }
+      .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+      .dot.live { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+      .dot.warn { background: var(--warn); }
+      .dot.off { background: var(--danger); }
+      h1 { font-size: 14px; margin: 0; font-weight: 650; }
+      .sub { font-size: 11px; color: var(--muted); }
+      .face {
+        background: radial-gradient(120% 100% at 50% 0%, #1c2531 0%, var(--card) 70%);
+        border: 1px solid var(--line);
+        border-radius: 24px;
+        padding: 14px;
+        text-align: center;
+        margin-bottom: 10px;
+      }
+      .hr { font-size: 46px; font-weight: 700; line-height: 1; letter-spacing: -1px; }
+      .hr small { font-size: 13px; color: var(--muted); font-weight: 500; }
+      .grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; margin-top: 12px; }
+      .cell { background: #10161d; border: 1px solid var(--line); border-radius: 12px; padding: 7px 4px; }
+      .cell b { display: block; font-size: 15px; font-weight: 650; }
+      .cell span { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
+      .unusual { color: var(--warn); }
+      .unusual-note { font-size: 10px; color: var(--muted); margin-top: 8px; }
+      section { margin-bottom: 10px; }
+      .label { font-size: 10px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin-bottom: 5px; }
+      .chips { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+      button {
+        font: inherit; color: var(--text); background: var(--card);
+        border: 1px solid var(--line); border-radius: 10px; padding: 8px 6px;
+        cursor: pointer; font-size: 12px;
+      }
+      button:hover { border-color: #3a4655; }
+      button.on { background: #1d4ed8; border-color: #2563eb; }
+      .row { display: flex; gap: 5px; }
+      .row button { flex: 1; }
+      .sos { background: #7f1d1d; border-color: #b91c1c; font-weight: 700; letter-spacing: .5px; }
+      .sos:hover { background: #991b1b; }
+      .slider { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
+      .slider span { font-size: 11px; color: var(--muted); width: 62px; }
+      .slider b { font-size: 11px; width: 42px; text-align: right; }
+      input[type="range"] { flex: 1; accent-color: #2563eb; }
+      ul { list-style: none; margin: 0; padding: 0; max-height: 92px; overflow-y: auto; }
+      li { font-size: 11px; color: var(--muted); padding: 3px 0; border-bottom: 1px solid #131a22; }
+      li.unusual { color: var(--warn); }
+      li.sos { color: var(--danger); font-weight: 600; }
+      li.error { color: var(--danger); }
+    </style>
+  </head>
+  <body>
+    <header>
+      <svg class="mark" viewBox="0 0 100 100" aria-hidden="true">
+        <g fill="none" stroke="currentColor" stroke-width="8.6" stroke-linecap="round">
+          <circle cx="48" cy="36" r="16.2" />
+          <path d="M58.4 23.6 Q62.6 20.4 65.4 16.8" />
+          <path d="M31.5 56.5 A17.6 17.6 0 1 0 64.5 56.5" />
+        </g>
+      </svg>
+      <span class="dot" id="dot"></span>
+      <div>
+        <h1 id="title">Gamira Watch</h1>
+        <div class="sub" id="status">connecting…</div>
+      </div>
+    </header>
+
+    <div class="face">
+      <div class="hr"><span id="hr">--</span><small> bpm</small></div>
+      <div class="grid">
+        <div class="cell"><b id="spo2">--</b><span>SpO₂</span></div>
+        <div class="cell"><b id="bp">--</b><span>BP</span></div>
+        <div class="cell"><b id="temp">--</b><span>Temp</span></div>
+      </div>
+      <div class="grid" style="grid-template-columns: 1fr 1fr">
+        <div class="cell"><b id="steps">--</b><span>Steps today</span></div>
+        <div class="cell"><b id="sync">--</b><span>Last sync</span></div>
+      </div>
+      <p class="unusual-note">
+        Amber = outside this simulator's band. Gamira itself never labels a
+        reading healthy or unhealthy.
+      </p>
+    </div>
+
+    <section>
+      <div class="label">Scenario</div>
+      <div class="chips" id="scenarios"></div>
+    </section>
+
+    <section>
+      <div class="label">Nudge a value</div>
+      <div class="slider">
+        <span>Heart rate</span>
+        <input type="range" id="s-hr" min="40" max="190" step="1" />
+        <b id="v-hr">--</b>
+      </div>
+      <div class="slider">
+        <span>Oxygen</span>
+        <input type="range" id="s-spo2" min="80" max="100" step="1" />
+        <b id="v-spo2">--</b>
+      </div>
+      <div class="slider">
+        <span>Temp</span>
+        <input type="range" id="s-temp" min="34" max="41" step="0.1" />
+        <b id="v-temp">--</b>
+      </div>
+    </section>
+
+    <section class="row">
+      <button id="send">Send now</button>
+      <button id="pause">Pause</button>
+    </section>
+
+    <section>
+      <button class="sos" id="sos" style="width: 100%; padding: 12px">
+        SOS — ALERT FAMILY
+      </button>
+    </section>
+
+    <section>
+      <div class="label">Activity</div>
+      <ul id="log"></ul>
+    </section>
+
+    <script>
+      const SCENARIOS = [
+        ['normal', 'Normal'],
+        ['resting', 'Resting'],
+        ['walking', 'Walking'],
+        ['tachycardia', 'Racing heart'],
+        ['low_spo2', 'Low oxygen'],
+        ['fever', 'Fever'],
+        ['hypertension', 'High BP'],
+        ['offline', 'Not syncing'],
+      ];
+      const index = Number(new URLSearchParams(location.search).get('w') || 0);
+      const $ = (id) => document.getElementById(id);
+      // A slider the user is holding must not be yanked back by the next poll.
+      let dragging = null;
+      let state = null;
+
+      const chips = $('scenarios');
+      SCENARIOS.forEach(([key, label]) => {
+        const button = document.createElement('button');
+        button.textContent = label;
+        button.dataset.key = key;
+        button.onclick = () => control({ scenario: key });
+        chips.appendChild(button);
+      });
+
+      async function control(body) {
+        await fetch('/api/control', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ index, ...body }),
+        });
+        refresh();
+      }
+
+      $('send').onclick = () =>
+        fetch('/api/send-now', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ index }),
+        });
+
+      $('pause').onclick = () => control({ paused: !state?.paused });
+
+      $('sos').onclick = async () => {
+        if (!confirm('Raise an SOS for ' + (state?.person || 'this person') + '?')) return;
+        const response = await fetch('/api/sos', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ index, note: null }),
+        });
+        const body = await response.json();
+        alert(
+          response.ok
+            ? `Alert raised. ${(body.notified_user_ids || []).length} family member(s) ` +
+                `now see it in their Gamira app. Nobody has been called.`
+            : `Could not raise the alert: ${body?.error?.message || 'unknown error'}`
+        );
+        refresh();
+      };
+
+      for (const [key, min, max] of [['hr', 40, 190], ['spo2', 80, 100], ['temp', 34, 41]]) {
+        const slider = $('s-' + key);
+        slider.onpointerdown = () => (dragging = key);
+        slider.oninput = () => ($('v-' + key).textContent = slider.value);
+        slider.onchange = () => {
+          dragging = null;
+          control({ [key]: Number(slider.value) });
+        };
+        slider.min = min;
+        slider.max = max;
+      }
+
+      function setSlider(key, value) {
+        if (dragging === key) return;
+        $('s-' + key).value = value;
+        $('v-' + key).textContent = key === 'temp' ? Number(value).toFixed(1) : value;
+      }
+
+      function ago(iso) {
+        if (!iso) return '--';
+        const seconds = Math.max(0, Math.round((Date.now() - new Date(iso)) / 1000));
+        return seconds < 60 ? seconds + 's' : Math.round(seconds / 60) + 'm';
+      }
+
+      async function refresh() {
+        let payload;
+        try {
+          payload = await (await fetch('/api/state')).json();
+        } catch {
+          $('status').textContent = 'simulator not reachable';
+          $('dot').className = 'dot off';
+          return;
+        }
+        state = payload.watches[index];
+        if (!state) return;
+
+        $('title').textContent = state.label;
+        $('status').textContent =
+          (state.person ? state.person + ' · ' : '') + state.status;
+        $('dot').className =
+          'dot ' +
+          (state.paused || state.scenario === 'offline'
+            ? 'off'
+            : Object.values(state.unusual).some(Boolean)
+              ? 'warn'
+              : 'live');
+
+        const r = state.readings;
+        const mark = (id, unusual) =>
+          $(id).classList.toggle('unusual', Boolean(unusual));
+        $('hr').textContent = r.heart_rate;
+        mark('hr', state.unusual.heart_rate);
+        $('spo2').textContent = r.oxygen_saturation + '%';
+        mark('spo2', state.unusual.oxygen_saturation);
+        $('bp').textContent =
+          r.blood_pressure_systolic + '/' + r.blood_pressure_diastolic;
+        mark(
+          'bp',
+          state.unusual.blood_pressure_systolic || state.unusual.blood_pressure_diastolic
+        );
+        $('temp').textContent = r.body_temperature.toFixed(1) + '°';
+        mark('temp', state.unusual.body_temperature);
+        $('steps').textContent = r.steps;
+        $('sync').textContent = ago(state.last_sync);
+
+        setSlider('hr', r.heart_rate);
+        setSlider('spo2', r.oxygen_saturation);
+        setSlider('temp', r.body_temperature);
+
+        $('pause').textContent = state.paused ? 'Resume' : 'Pause';
+        for (const button of chips.children) {
+          button.classList.toggle('on', button.dataset.key === state.scenario);
+        }
+
+        $('log').innerHTML = state.log
+          .map(
+            (entry) =>
+              `<li class="${entry.kind}">${entry.text.replace(/</g, '&lt;')}</li>`
+          )
+          .join('');
+      }
+
+      refresh();
+      setInterval(refresh, 1000);
+    </script>
+  </body>
+</html>

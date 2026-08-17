@@ -1,0 +1,1402 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Gamira Server Console</title>
+    <!-- The shared mark (tools/assets/gamira-mark.svg), green so this window is
+         tellable from the apps and the watch in the taskbar. -->
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='24' fill='%230b0f14'/%3E%3Cg fill='none' stroke='%234ade80' stroke-width='8.6' stroke-linecap='round'%3E%3Ccircle cx='48' cy='36' r='16.2'/%3E%3Cpath d='M58.4 23.6 Q62.6 20.4 65.4 16.8'/%3E%3Cpath d='M31.5 56.5 A17.6 17.6 0 1 0 64.5 56.5'/%3E%3C/g%3E%3C/svg%3E"
+    />
+    <style>
+      :root {
+        --bg: #0b0f14;
+        --panel: #151b23;
+        --panel-2: #10161d;
+        --line: #232c37;
+        --text: #e8edf3;
+        --muted: #8b98a8;
+        --accent: #4ade80;
+        --blue: #60a5fa;
+        --violet: #a78bfa;
+        --warn: #fbbf24;
+        --danger: #f87171;
+      }
+      * { box-sizing: border-box; }
+      /* No visible scrollbars anywhere, same as the app windows. Wheel,
+         trackpad, touch and keyboard scrolling all still work. */
+      * { scrollbar-width: none; -ms-overflow-style: none; }
+      ::-webkit-scrollbar { width: 0; height: 0; display: none; }
+
+      html, body { height: 100%; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 13px/1.45 "Segoe UI", system-ui, sans-serif;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+
+      header {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 9px 14px;
+        border-bottom: 1px solid var(--line);
+        background: linear-gradient(180deg, #182029 0%, var(--panel) 100%);
+        flex: none;
+      }
+      .mark { width: 26px; height: 26px; color: var(--accent); flex: none; }
+      .brand { font-weight: 700; letter-spacing: .2px; line-height: 1.15; }
+      .brand small { display: block; font-size: 10px; color: var(--muted); font-weight: 500;
+                     text-transform: uppercase; letter-spacing: .8px; }
+      .services { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; }
+      .svc {
+        display: flex; align-items: center; gap: 6px;
+        background: var(--panel-2); border: 1px solid var(--line);
+        border-radius: 999px; padding: 4px 10px; font-size: 11px;
+      }
+      .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--danger); flex: none; }
+      .dot.up { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+      .uptime { font-size: 11px; color: var(--muted); white-space: nowrap; text-align: right; }
+
+      nav { display: flex; gap: 2px; padding: 8px 14px 0; flex: none; }
+      nav button {
+        background: none; border: none; border-bottom: 2px solid transparent;
+        color: var(--muted); font: inherit; padding: 6px 12px; cursor: pointer;
+      }
+      nav button.on { color: var(--text); border-bottom-color: var(--blue); }
+      nav .count { font-size: 10px; color: var(--muted); margin-left: 4px; }
+
+      main { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 10px 14px 12px; }
+      .tab { display: none; flex: 1; min-height: 0; flex-direction: column; gap: 8px; }
+
+      /* Health meters. Never colour alone: every state also carries a word. */
+      .meter { margin-bottom: 14px; }
+      .meter .top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+      .meter .label { font-size: 12px; font-weight: 600; }
+      .meter .value { font: 12px/1 ui-monospace, Consolas, monospace; color: var(--muted); }
+      .meter .track { height: 8px; border-radius: 4px; background: #23262e; margin-top: 6px; overflow: hidden; }
+      .meter .fill { height: 100%; border-radius: 4px; transition: width .4s ease, background .4s ease; }
+      .fill.ok { background: #16a34a; }
+      .fill.warn { background: #d97706; }
+      .fill.critical { background: #dc2626; }
+      .meter .note { font-size: 11px; color: var(--muted); margin-top: 4px; }
+      .alarm { border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; font-size: 12px; line-height: 1.5; }
+      .alarm .tag { font-weight: 700; text-transform: uppercase; font-size: 10px; letter-spacing: .05em; margin-right: 6px; }
+      .alarm.warn { background: rgba(217, 119, 6, .14); border: 1px solid rgba(217, 119, 6, .45); }
+      .alarm.critical { background: rgba(220, 38, 38, .16); border: 1px solid rgba(220, 38, 38, .5); }
+      .alarm.ok { background: rgba(22, 163, 74, .12); border: 1px solid rgba(22, 163, 74, .4); }
+      .spark { display: flex; align-items: flex-end; gap: 1px; height: 40px; margin-top: 6px; }
+      .spark i { flex: 1; min-width: 1px; background: #3b82f6; border-radius: 1px 1px 0 0; }
+      .spark i.hot { background: #dc2626; }
+      .tab.on { display: flex; }
+
+      .bar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; flex: none; }
+      .chip {
+        background: var(--panel); border: 1px solid var(--line); color: var(--muted);
+        border-radius: 999px; padding: 4px 11px; font-size: 11px; cursor: pointer;
+        user-select: none; white-space: nowrap;
+      }
+      .chip.on { background: #1d4ed8; border-color: #2563eb; color: #fff; }
+      .chip .n { opacity: .65; margin-left: 5px; font-variant-numeric: tabular-nums; }
+      .sep { width: 1px; align-self: stretch; background: var(--line); margin: 2px 4px; }
+      input[type="text"], input[type="search"], select, textarea {
+        background: var(--panel-2); border: 1px solid var(--line); color: var(--text);
+        border-radius: 8px; padding: 6px 10px; font: inherit; outline: none;
+      }
+      input:focus, textarea:focus, select:focus { border-color: #2563eb; }
+      .grow { flex: 1; min-width: 150px; }
+      button.action {
+        background: var(--panel); border: 1px solid var(--line); color: var(--text);
+        border-radius: 8px; padding: 6px 11px; font: inherit; font-size: 12px; cursor: pointer;
+        white-space: nowrap;
+      }
+      button.action:hover { border-color: #3a4655; }
+      button.action.on { background: #1d4ed8; border-color: #2563eb; }
+      button.action.danger { border-color: #7f1d1d; color: #fca5a5; }
+      button.action.danger:hover { background: #2a1113; }
+      button.action:disabled { opacity: .45; cursor: not-allowed; }
+
+      #log {
+        flex: 1; min-height: 0; overflow-y: auto;
+        background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
+        padding: 8px 10px;
+        font: 12px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace;
+      }
+      .row { display: flex; gap: 8px; white-space: pre-wrap; word-break: break-word; }
+      .row.pick { background: #16202b; }
+      .row .t { color: #55606d; flex: none; }
+      .row .tag { flex: none; width: 56px; }
+      .row .msg { flex: 1; color: #c9d3de; }
+      .row .rep {
+        flex: none; align-self: center; font-size: 10px; color: var(--muted);
+        border: 1px solid var(--line); border-radius: 999px; padding: 0 6px;
+      }
+      mark { background: #3b3f16; color: #fde68a; border-radius: 2px; }
+      .tag-api { color: var(--blue); }
+      .tag-parent { color: #67e8f9; }
+      .tag-dash { color: var(--violet); }
+      .tag-watch { color: var(--warn); }
+      .tag-voice { color: #f0abfc; }
+      .tag-run, .tag-db { color: #7d8b9a; }
+      .k-error .msg { color: #fca5a5; }
+      .k-sos .msg { color: #fca5a5; font-weight: 700; }
+      .k-unusual .msg { color: var(--warn); }
+      .k-read .msg { color: #7f8b99; }
+
+      .panels { display: grid; grid-template-columns: 280px 1fr; gap: 10px; flex: 1; min-height: 0; }
+      .panel {
+        background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
+        padding: 10px; overflow-y: auto;
+      }
+      .panel h3 {
+        margin: 0 0 8px; font-size: 10px; text-transform: uppercase;
+        letter-spacing: .7px; color: var(--muted); font-weight: 600;
+      }
+      .stack { display: flex; flex-direction: column; gap: 6px; }
+      .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; }
+      .card .name { font-size: 12px; font-weight: 600; }
+      .card .meta { font-size: 11px; color: var(--muted); word-break: break-all; }
+      .rowline { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+
+      table { width: 100%; border-collapse: collapse; font: 11px/1.4 ui-monospace, Consolas, monospace; }
+      th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #1a222b; white-space: nowrap; }
+      th { color: var(--muted); position: sticky; top: 0; background: var(--panel-2); cursor: pointer; }
+      td { color: #c9d3de; }
+      tr.clickable:hover td { background: #16202b; }
+      td.s2 { color: var(--accent); } td.s4 { color: var(--warn); } td.s5 { color: var(--danger); }
+      .tablelist button {
+        display: block; width: 100%; text-align: left; background: none; border: none;
+        color: var(--text); font: inherit; padding: 5px 7px; border-radius: 7px; cursor: pointer;
+      }
+      .tablelist button:hover { background: var(--panel); }
+      .tablelist button.on { background: #1d4ed8; }
+      .tablelist .n { float: right; color: var(--muted); font-size: 11px; }
+      .note { font-size: 11px; color: var(--muted); }
+      .big { font-size: 22px; font-weight: 700; letter-spacing: -.4px; }
+      .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+      .toggle { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+      .toggle input { accent-color: #2563eb; width: 15px; height: 15px; }
+      .qr { background: #fff; border-radius: 10px; padding: 8px; width: 168px; height: 168px; }
+      .qr svg { width: 100%; height: 100%; display: block; }
+      .flash {
+        position: fixed; right: 16px; bottom: 16px; background: var(--panel);
+        border: 1px solid var(--line); border-radius: 10px; padding: 9px 13px;
+        font-size: 12px; opacity: 0; transition: opacity .2s; pointer-events: none;
+        max-width: 420px; z-index: 50;
+      }
+      .flash.show { opacity: 1; }
+      .flash.bad { border-color: #7f1d1d; color: #fca5a5; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <svg class="mark" viewBox="0 0 100 100" aria-hidden="true">
+        <g fill="none" stroke="currentColor" stroke-width="8.6" stroke-linecap="round">
+          <circle cx="48" cy="36" r="16.2" />
+          <path d="M58.4 23.6 Q62.6 20.4 65.4 16.8" />
+          <path d="M31.5 56.5 A17.6 17.6 0 1 0 64.5 56.5" />
+        </g>
+      </svg>
+      <div class="brand">Gamira<small>server console</small></div>
+      <div class="services" id="services"></div>
+      <div class="uptime"><span id="uptime"></span><br /><span id="armed" class="note"></span></div>
+    </header>
+
+    <nav>
+      <button class="on" data-tab="logs">Logs</button>
+      <button data-tab="requests">Requests<span class="count" id="req-count"></span></button>
+      <button data-tab="voice">Voice</button>
+      <button data-tab="cost">Cost<span class="count" id="cost-count"></span></button>
+      <button data-tab="phone">Phone</button>
+      <button data-tab="health">Health<span class="count" id="health-count"></span></button>
+      <button data-tab="control">Control</button>
+      <button data-tab="data">Database</button>
+    </nav>
+
+    <main>
+      <!-- ---------------------------------------------------------------- -->
+      <section class="tab on" id="tab-logs">
+        <div class="bar">
+          <input
+            type="search"
+            class="grow"
+            id="search"
+            placeholder="filter…  word   -exclude   /regex/     ( / to focus )"
+          />
+          <button class="action" id="collapse">Collapse repeats</button>
+          <button class="action on" id="autoscroll">Follow</button>
+          <button class="action" id="pause">Pause</button>
+          <button class="action" id="clear">Clear</button>
+          <button class="action" id="save">Save</button>
+        </div>
+        <div class="bar" id="kinds"></div>
+        <div class="bar">
+          <span id="tags" style="display: contents"></span>
+          <span class="sep"></span>
+          <select id="window">
+            <option value="0">All time</option>
+            <option value="60">Last minute</option>
+            <option value="300">Last 5 minutes</option>
+            <option value="900">Last 15 minutes</option>
+          </select>
+          <select id="preset"><option value="">Presets…</option></select>
+          <button class="action" id="save-preset">Save preset</button>
+        </div>
+        <div id="log"></div>
+        <div class="note" id="counts"></div>
+      </section>
+
+      <!-- ---------------------------------------------------------------- -->
+      <section class="tab" id="tab-requests">
+        <div class="bar">
+          <input type="search" class="grow" id="req-search" placeholder="filter by path…" />
+          <span class="chip on" data-status="all">All</span>
+          <span class="chip" data-status="write">Writes</span>
+          <span class="chip" data-status="error">4xx / 5xx</span>
+          <span class="chip" data-status="slow">Slowest</span>
+          <span class="note" id="req-note"></span>
+        </div>
+        <div class="panels" style="grid-template-columns: 1fr 1fr">
+          <div class="panel">
+            <h3>Recent</h3>
+            <table id="req-table"></table>
+          </div>
+          <div class="panel">
+            <h3>By endpoint</h3>
+            <table id="endpoint-table"></table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------------------------- -->
+      <section class="tab" id="tab-voice">
+        <div class="panels" style="grid-template-columns: 1fr 1fr">
+          <div class="panel">
+            <h3>Model</h3>
+            <div class="stack" id="voice-models"></div>
+            <h3 style="margin-top: 14px">Behaviour</h3>
+            <div class="stack" id="voice-toggles"></div>
+            <h3 style="margin-top: 14px">Voice</h3>
+            <div class="bar">
+              <select id="voice-name" class="grow"></select>
+              <button class="action" id="voice-apply">Apply</button>
+            </div>
+            <p class="note" id="voice-note" style="margin-top: 10px"></p>
+          </div>
+          <div class="panel">
+            <h3>What these do</h3>
+            <div class="stack">
+              <div class="card">
+                <div class="name">Proactive audio</div>
+                <div class="meta">
+                  The model decides whether what it heard was meant for it, and
+                  stays quiet if not — a television in the room rather than a
+                  question. 2.5 native audio only.
+                </div>
+              </div>
+              <div class="card">
+                <div class="name">Affective dialogue</div>
+                <div class="meta">
+                  Delivery follows the speaker's tone instead of one fixed
+                  reading. 2.5 native audio only.
+                </div>
+              </div>
+              <div class="card">
+                <div class="name">Where this applies</div>
+                <div class="meta">
+                  The token server pins the model and config when it mints a
+                  token, so a change here takes effect on the next session —
+                  press the mic again. An open session keeps what it started
+                  with, and the browser never sees the API key.
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------------------------- -->
+      <section class="tab" id="tab-cost">
+        <div class="kpis">
+          <div class="card"><div class="note">Sessions</div><div class="big" id="c-sessions">0</div></div>
+          <div class="card"><div class="note">Tokens</div><div class="big" id="c-tokens">0</div></div>
+          <div class="card"><div class="note">Estimated cost</div><div class="big" id="c-cost">$0.00</div></div>
+          <div class="card"><div class="note">Rates checked</div><div class="big" id="c-checked">—</div></div>
+        </div>
+        <div class="panels" style="grid-template-columns: 1fr 1fr">
+          <div class="panel">
+            <h3>By model</h3>
+            <table id="cost-models"></table>
+            <h3 style="margin-top: 14px">By session</h3>
+            <table id="cost-sessions"></table>
+          </div>
+          <div class="panel">
+            <h3>How this is worked out</h3>
+            <p class="note" id="cost-note"></p>
+            <h3 style="margin-top: 14px">Latest session, by modality</h3>
+            <table id="cost-lines"></table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------------------------- -->
+      <section class="tab" id="tab-phone">
+        <div id="phone-off" class="panel">
+          <h3>Not on the network</h3>
+          <p class="note">
+            Restart with <b>--phone</b> to serve the apps to this network over
+            https, with addresses and QR codes here:
+          </p>
+          <p class="note" style="margin-top: 6px">
+            <code>python run.py --phone</code>
+          </p>
+          <p class="note" style="margin-top: 10px">
+            https is what makes the microphone work on a phone — browsers only
+            hand a page the mic on a secure origin. The certificate is
+            self-signed and generated on this machine, so the phone asks once
+            before trusting it. The Gemini token server stays on localhost
+            either way; the phone reaches it through the app's own address, so
+            the API key never goes on the network.
+          </p>
+        </div>
+        <div id="phone-on" style="display: none; overflow-y: auto">
+          <p class="note" id="phone-head"></p>
+          <div id="phone-links" style="display: flex; flex-wrap: wrap; gap: 12px; margin-top: 10px"></div>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------------------------- -->
+      <section class="tab" id="tab-health">
+        <div class="panels" style="grid-template-columns: 1fr 1fr">
+          <div class="panel">
+            <h3>This machine</h3>
+            <div id="health-alarms"></div>
+            <div id="health-meters"></div>
+            <div class="note" id="health-stamp"></div>
+          </div>
+          <div class="panel">
+            <h3>CPU, last three minutes</h3>
+            <div class="spark" id="health-spark"></div>
+            <div class="note">
+              Blue is the whole machine. Red is above the warning line. The bars
+              are three seconds apart.
+            </div>
+
+            <h3 style="margin-top: 14px">What this run is using</h3>
+            <table id="health-own"></table>
+            <div class="note">
+              Gamira's own processes only. Worth comparing against the machine
+              total above: "the CPU is pinned" and "<em>we</em> are pinning it"
+              need different answers.
+            </div>
+
+            <h3 style="margin-top: 14px">Why this tab exists</h3>
+            <div class="note">
+              On 17 August 2026 this machine hard-crashed at 11:51 during a long
+              backend test run, rebooted, and came back with Windows firmware
+              limiting the CPU — the mouse lagged for minutes. Nothing in this
+              console showed it coming, because everything here watched the API
+              rather than the computer it runs on.
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------------------------- -->
+      <section class="tab" id="tab-control">
+        <div class="panels" style="grid-template-columns: 1fr 1fr">
+          <div class="panel">
+            <h3>Services</h3>
+            <div class="stack" id="svc-cards"></div>
+            <h3 style="margin-top: 14px">Database</h3>
+            <div class="stack">
+              <button class="action" data-act="seed">Load sample data if missing</button>
+              <button class="action danger" data-act="reset-db">
+                Rebuild database from seed (deletes local data)
+              </button>
+              <div class="note" id="db-note"></div>
+            </div>
+          </div>
+          <div class="panel">
+            <h3>Windows</h3>
+            <div class="stack" id="window-cards"></div>
+            <h3 style="margin-top: 14px">Try something</h3>
+            <div class="stack" id="sos-cards"></div>
+            <div class="note">
+              Both go through the same endpoints the apps use. An SOS is a
+              person asking for help — red, interrupting. A flagged reading is
+              a watch reporting that a number left the range set on it — amber,
+              dismissible. Gamira contacts nobody outside the app either way.
+            </div>
+            <h3 style="margin-top: 14px">This run</h3>
+            <div class="stack">
+              <button class="action" data-act="open-docs">Open API documentation</button>
+              <button class="action danger" data-act="stop-all">Stop everything</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------------------------- -->
+      <section class="tab" id="tab-data">
+        <div class="bar">
+          <input type="text" class="grow" id="sql" placeholder="SELECT * FROM health_readings ORDER BY measured_at DESC LIMIT 20" />
+          <button class="action" id="run-sql">Run</button>
+          <span class="note">Read-only: SELECT only, 200 rows.</span>
+        </div>
+        <div class="panels">
+          <div class="panel tablelist" id="tables"></div>
+          <div class="panel" id="rows"><p class="note">Pick a table.</p></div>
+        </div>
+      </section>
+    </main>
+
+    <div class="flash" id="flash"></div>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const TAGS = ["api", "parent", "dash", "watch", "voice", "run", "db"];
+      const KINDS = [
+        ["write", "Writes"],
+        ["read", "Reads"],
+        ["error", "Errors"],
+        ["sos", "SOS"],
+        ["unusual", "Unusual"],
+        ["info", "Info"],
+      ];
+
+      let entries = [];
+      let lastSeq = 0;
+      let kinds = new Set(KINDS.map(([key]) => key)); // multi-select, all on
+      let hiddenTags = new Set();
+      let paused = false;
+      let pending = 0;
+      let follow = true;
+      let collapse = false;
+      let pickedRequest = null;
+      let currentTable = null;
+      let voiceState = null;
+      let reqFilter = "all";
+
+      const escapeHtml = (text) =>
+        String(text).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+
+      function flash(message, bad) {
+        const box = $("flash");
+        box.textContent = message;
+        box.className = "flash show" + (bad ? " bad" : "");
+        clearTimeout(box._timer);
+        box._timer = setTimeout(() => (box.className = "flash"), 3000);
+      }
+
+      // -- tabs ------------------------------------------------------------ //
+
+      document.querySelectorAll("nav button").forEach((button) => {
+        button.onclick = () => {
+          document.querySelectorAll("nav button").forEach((b) => b.classList.remove("on"));
+          document.querySelectorAll(".tab").forEach((t) => t.classList.remove("on"));
+          button.classList.add("on");
+          $("tab-" + button.dataset.tab).classList.add("on");
+          if (button.dataset.tab === "data") loadTables();
+          if (button.dataset.tab === "requests") loadRequests();
+          if (button.dataset.tab === "voice") loadVoice();
+          if (button.dataset.tab === "cost") loadCost();
+          if (button.dataset.tab === "health") loadHealth();
+        };
+      });
+
+      // -- log filters ------------------------------------------------------ //
+
+      const kindBar = $("kinds");
+      KINDS.forEach(([key, label]) => {
+        const chip = document.createElement("span");
+        chip.className = "chip on";
+        chip.dataset.kind = key;
+        chip.innerHTML = `${label}<span class="n" data-n="${key}">0</span>`;
+        chip.onclick = (event) => {
+          // Alt-click isolates one kind; a plain click toggles it.
+          if (event.altKey) {
+            kinds = new Set([key]);
+          } else if (kinds.has(key)) {
+            kinds.delete(key);
+          } else {
+            kinds.add(key);
+          }
+          syncChips();
+          render();
+        };
+        kindBar.appendChild(chip);
+      });
+
+      const tagBar = $("tags");
+      TAGS.forEach((tag) => {
+        const chip = document.createElement("span");
+        chip.className = "chip on";
+        chip.dataset.tag = tag;
+        chip.innerHTML = `${tag}<span class="n" data-n="tag-${tag}">0</span>`;
+        chip.onclick = () => {
+          if (hiddenTags.has(tag)) hiddenTags.delete(tag);
+          else hiddenTags.add(tag);
+          syncChips();
+          render();
+        };
+        tagBar.appendChild(chip);
+      });
+
+      function syncChips() {
+        document
+          .querySelectorAll("[data-kind]")
+          .forEach((chip) => chip.classList.toggle("on", kinds.has(chip.dataset.kind)));
+        document
+          .querySelectorAll("[data-tag]")
+          .forEach((chip) => chip.classList.toggle("on", !hiddenTags.has(chip.dataset.tag)));
+      }
+
+      /**
+       * `word` includes, `-word` excludes, `/re/` is a regular expression.
+       * Everything is combined with AND, which is what you want when hunting
+       * one request out of a busy log.
+       */
+      function buildMatcher(query) {
+        const terms = query.trim().split(/\s+/).filter(Boolean);
+        if (!terms.length) return { test: () => true, highlight: null };
+        const includes = [];
+        const excludes = [];
+        let regex = null;
+        for (const term of terms) {
+          if (term.startsWith("/") && term.endsWith("/") && term.length > 2) {
+            try {
+              regex = new RegExp(term.slice(1, -1), "i");
+            } catch {
+              /* an unfinished expression matches nothing yet */
+            }
+          } else if (term.startsWith("-") && term.length > 1) {
+            excludes.push(term.slice(1).toLowerCase());
+          } else {
+            includes.push(term.toLowerCase());
+          }
+        }
+        return {
+          test: (text) => {
+            const lower = text.toLowerCase();
+            if (excludes.some((term) => lower.includes(term))) return false;
+            if (!includes.every((term) => lower.includes(term))) return false;
+            return regex ? regex.test(text) : true;
+          },
+          highlight: includes[0] || null,
+        };
+      }
+
+      function visible() {
+        const matcher = buildMatcher($("search").value);
+        const seconds = Number($("window").value || 0);
+        const cutoff = seconds ? Date.now() / 1000 - seconds : 0;
+        return entries.filter((entry) => {
+          if (hiddenTags.has(entry.tag)) return false;
+          if (!kinds.has(entry.kind)) return false;
+          if (cutoff && entry.t < cutoff) return false;
+          if (pickedRequest && entry.request_id !== pickedRequest) return false;
+          return matcher.test(entry.text);
+        });
+      }
+
+      function collapsed(rows) {
+        if (!collapse) return rows.map((entry) => ({ entry, repeat: 1 }));
+        const out = [];
+        for (const entry of rows) {
+          const last = out[out.length - 1];
+          if (last && last.entry.text === entry.text && last.entry.tag === entry.tag) {
+            last.repeat += 1;
+            last.entry = entry;
+          } else {
+            out.push({ entry, repeat: 1 });
+          }
+        }
+        return out;
+      }
+
+      function render() {
+        const matcher = buildMatcher($("search").value);
+        const rows = collapsed(visible().slice(-1500));
+        const mark = matcher.highlight;
+        $("log").innerHTML = rows
+          .map(({ entry, repeat }) => {
+            let text = escapeHtml(entry.text);
+            if (mark) {
+              const safe = mark.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+              text = text.replace(new RegExp(safe, "gi"), (hit) => `<mark>${hit}</mark>`);
+            }
+            const rid = entry.request_id
+              ? ` data-rid="${entry.request_id}" title="click: only this request"`
+              : "";
+            return (
+              `<div class="row k-${entry.kind}"${rid}><span class="t">${entry.at}</span>` +
+              `<span class="tag tag-${entry.tag}">${entry.tag}</span>` +
+              `<span class="msg">${text}</span>` +
+              (repeat > 1 ? `<span class="rep">×${repeat}</span>` : "") +
+              `</div>`
+            );
+          })
+          .join("");
+        if (follow) $("log").scrollTop = $("log").scrollHeight;
+
+        document.querySelectorAll("#log [data-rid]").forEach((row) => {
+          row.onclick = () => {
+            pickedRequest = pickedRequest === row.dataset.rid ? null : row.dataset.rid;
+            flash(pickedRequest ? `Only request ${pickedRequest.slice(0, 8)}` : "All requests");
+            render();
+          };
+        });
+
+        const counts = {};
+        entries.forEach((entry) => {
+          counts[entry.kind] = (counts[entry.kind] || 0) + 1;
+          counts["tag-" + entry.tag] = (counts["tag-" + entry.tag] || 0) + 1;
+        });
+        document.querySelectorAll("[data-n]").forEach((span) => {
+          span.textContent = counts[span.dataset.n] || 0;
+        });
+        $("counts").textContent =
+          `${entries.length} lines · ${rows.length} shown` +
+          (pickedRequest ? ` · pinned to one request` : "") +
+          (paused ? ` · paused, ${pending} waiting` : "");
+      }
+
+      $("search").oninput = render;
+      $("window").onchange = render;
+      $("collapse").onclick = () => {
+        collapse = !collapse;
+        $("collapse").classList.toggle("on", collapse);
+        render();
+      };
+      $("autoscroll").onclick = () => {
+        follow = !follow;
+        $("autoscroll").classList.toggle("on", follow);
+        if (follow) render();
+      };
+      $("pause").onclick = () => {
+        paused = !paused;
+        $("pause").textContent = paused ? `Resume` : "Pause";
+        $("pause").classList.toggle("on", paused);
+        if (!paused) pollLogs();
+        render();
+      };
+      $("clear").onclick = async () => {
+        await act("clear-logs");
+        entries = [];
+        lastSeq = 0;
+        pickedRequest = null;
+        render();
+      };
+      $("save").onclick = () => {
+        const text = visible().map((e) => `${e.at} [${e.tag}] ${e.text}`).join("\n");
+        const url = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = "gamira-log.txt";
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      };
+
+      document.addEventListener("keydown", (event) => {
+        if (event.key === "/" && document.activeElement !== $("search")) {
+          event.preventDefault();
+          $("search").focus();
+        }
+        if (event.key === "Escape" && document.activeElement === $("search")) {
+          $("search").value = "";
+          render();
+        }
+      });
+
+      // Presets: a filter you built once is worth keeping.
+      const PRESET_KEY = "gamira.console.presets";
+      const readPresets = () => {
+        try {
+          return JSON.parse(localStorage.getItem(PRESET_KEY) || "{}");
+        } catch {
+          return {};
+        }
+      };
+      function drawPresets() {
+        const presets = readPresets();
+        $("preset").innerHTML =
+          '<option value="">Presets…</option>' +
+          Object.keys(presets)
+            .map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`)
+            .join("");
+      }
+      $("save-preset").onclick = () => {
+        const name = prompt("Name this filter");
+        if (!name) return;
+        const presets = readPresets();
+        presets[name] = {
+          search: $("search").value,
+          kinds: [...kinds],
+          hidden: [...hiddenTags],
+          window: $("window").value,
+        };
+        localStorage.setItem(PRESET_KEY, JSON.stringify(presets));
+        drawPresets();
+        flash(`Saved "${name}"`);
+      };
+      $("preset").onchange = () => {
+        const preset = readPresets()[$("preset").value];
+        if (!preset) return;
+        $("search").value = preset.search || "";
+        kinds = new Set(preset.kinds || KINDS.map(([k]) => k));
+        hiddenTags = new Set(preset.hidden || []);
+        $("window").value = preset.window || "0";
+        syncChips();
+        render();
+      };
+      drawPresets();
+
+      async function pollLogs() {
+        try {
+          const data = await (await fetch("/api/logs?after=" + lastSeq)).json();
+          if (data.seq < lastSeq) {
+            entries = [];
+            lastSeq = 0;
+          }
+          if (data.entries.length) {
+            lastSeq = data.entries[data.entries.length - 1].seq;
+            if (paused) {
+              pending += data.entries.length;
+              $("counts").textContent = `paused · ${pending} waiting`;
+              return;
+            }
+            pending = 0;
+            entries = entries.concat(data.entries).slice(-6000);
+            render();
+          }
+        } catch {
+          /* the runner is gone or restarting; the next poll recovers */
+        }
+      }
+
+      // -- requests --------------------------------------------------------- //
+
+      document.querySelectorAll("[data-status]").forEach((chip) => {
+        chip.onclick = () => {
+          document.querySelectorAll("[data-status]").forEach((c) => c.classList.remove("on"));
+          chip.classList.add("on");
+          reqFilter = chip.dataset.status;
+          loadRequests();
+        };
+      });
+      $("req-search").oninput = () => loadRequests();
+
+      async function loadRequests() {
+        let data;
+        try {
+          data = await (await fetch("/api/requests")).json();
+        } catch {
+          return;
+        }
+        $("req-count").textContent = data.total ? `(${data.total})` : "";
+
+        const needle = $("req-search").value.trim().toLowerCase();
+        let rows = data.recent.filter((row) => !needle || row.path.toLowerCase().includes(needle));
+        if (reqFilter === "write") rows = rows.filter((row) => row.method !== "GET");
+        if (reqFilter === "error") rows = rows.filter((row) => row.status >= 400);
+        if (reqFilter === "slow") rows = [...rows].sort((a, b) => b.ms - a.ms).slice(0, 25);
+        else rows = rows.slice(-200).reverse();
+
+        $("req-table").innerHTML =
+          "<thead><tr><th>time</th><th>method</th><th>path</th><th>status</th><th>ms</th></tr></thead><tbody>" +
+          rows
+            .map(
+              (row) =>
+                `<tr class="clickable" data-rid="${row.request_id}"><td>${row.at}</td>` +
+                `<td>${row.method}</td><td>${escapeHtml(row.short)}</td>` +
+                `<td class="s${String(row.status)[0]}">${row.status}</td>` +
+                `<td>${row.ms.toFixed(1)}</td></tr>`
+            )
+            .join("") +
+          "</tbody>";
+
+        document.querySelectorAll("#req-table [data-rid]").forEach((row) => {
+          row.onclick = () => {
+            pickedRequest = row.dataset.rid || null;
+            document.querySelector('nav [data-tab="logs"]').click();
+            render();
+            flash(`Showing only request ${(pickedRequest || "").slice(0, 8)}`);
+          };
+        });
+
+        const endpoints = data.endpoints.slice(0, 40);
+        $("endpoint-table").innerHTML =
+          "<thead><tr><th>method</th><th>endpoint</th><th>n</th><th>err</th><th>p50</th><th>p95</th><th>max</th></tr></thead><tbody>" +
+          endpoints
+            .map(
+              (row) =>
+                `<tr><td>${row.method}</td><td>${escapeHtml(row.template)}</td>` +
+                `<td>${row.count}</td><td class="${row.errors ? "s5" : ""}">${row.errors}</td>` +
+                `<td>${row.p50}</td><td>${row.p95}</td><td>${row.max}</td></tr>`
+            )
+            .join("") +
+          "</tbody>";
+        $("req-note").textContent = `${data.endpoints.length} endpoints · ids collapsed to :id`;
+      }
+
+      // -- voice ------------------------------------------------------------ //
+
+      async function loadVoice() {
+        let data;
+        try {
+          data = await (await fetch("/api/voice")).json();
+        } catch {
+          return;
+        }
+        if (data.error) {
+          $("voice-models").innerHTML = `<p class="note">${escapeHtml(data.error)}</p>`;
+          $("voice-toggles").innerHTML = "";
+          $("voice-name").innerHTML = "";
+          return;
+        }
+        voiceState = data;
+        const current = data.models.find((model) => model.id === data.model) || data.models[0];
+
+        $("voice-models").innerHTML = data.models
+          .map(
+            (model) =>
+              `<div class="card rowline"><div><div class="name">${model.label}</div>` +
+              `<div class="meta">${escapeHtml(model.note)}</div>` +
+              `<div class="meta">${model.id} · ${model.api_version}</div></div>` +
+              `<button class="action ${model.id === data.model ? "on" : ""}" ` +
+              `data-model="${model.id}">${model.id === data.model ? "In use" : "Use"}</button></div>`
+          )
+          .join("");
+        document.querySelectorAll("[data-model]").forEach((button) => {
+          button.onclick = () => saveVoice({ model: button.dataset.model, voice: null });
+        });
+
+        $("voice-toggles").innerHTML = [
+          ["proactive_audio", "Proactive audio"],
+          ["affective_dialog", "Affective dialogue"],
+        ]
+          .map(([key, label]) => {
+            const supported = current[key];
+            return (
+              `<label class="card toggle"><input type="checkbox" data-flag="${key}" ` +
+              `${data.settings[key] ? "checked" : ""} ${supported ? "" : "disabled"} />` +
+              `<span><span class="name">${label}</span>` +
+              `<span class="meta">${supported ? "supported by this model" : `not available on ${current.label}`}</span>` +
+              `</span></label>`
+            );
+          })
+          .join("");
+        document.querySelectorAll("[data-flag]").forEach((box) => {
+          box.onchange = () => saveVoice({ [box.dataset.flag]: box.checked });
+        });
+
+        $("voice-name").innerHTML = current.voices
+          .map(
+            (voice) =>
+              `<option value="${voice}" ${voice === data.settings.voice ? "selected" : ""}>${voice}${
+                voice === current.default_voice ? " (default)" : ""
+              }</option>`
+          )
+          .join("");
+        $("voice-note").textContent =
+          `Next session: ${current.label}, voice ${data.settings.voice}` +
+          `${data.settings.proactive_audio ? ", proactive" : ""}` +
+          `${data.settings.affective_dialog ? ", affective" : ""}.` +
+          ` Press the mic in the Parent App to hear it.`;
+        $("armed").textContent = `${current.label} · ${data.settings.voice}`;
+      }
+
+      $("voice-apply").onclick = () => saveVoice({ voice: $("voice-name").value });
+
+      async function saveVoice(patch) {
+        try {
+          const response = await fetch("/api/voice", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(patch),
+          });
+          const body = await response.json();
+          if (body.error) throw new Error(body.error);
+          flash("Applies to the next voice session");
+          loadVoice();
+        } catch (error) {
+          flash(String(error.message || error), true);
+        }
+      }
+
+      // -- cost -------------------------------------------------------------- //
+
+      const money = (value) => "$" + Number(value || 0).toFixed(value < 0.01 ? 5 : 4);
+
+      async function loadCost() {
+        let data;
+        try {
+          data = await (await fetch("/api/cost")).json();
+        } catch {
+          return;
+        }
+        if (data.error) {
+          $("cost-note").textContent = data.error;
+          return;
+        }
+        $("c-sessions").textContent = data.sessions.length;
+        $("c-tokens").textContent = data.totals.tokens.toLocaleString();
+        $("c-cost").textContent = money(data.totals.cost);
+        $("c-checked").textContent = data.checked || "—";
+        $("cost-count").textContent = data.totals.cost ? `(${money(data.totals.cost)})` : "";
+
+        $("cost-models").innerHTML =
+          "<thead><tr><th>model</th><th>tokens</th><th>cost</th></tr></thead><tbody>" +
+          data.byModel
+            .map(
+              (row) =>
+                `<tr><td>${escapeHtml(row.label)}</td><td>${row.tokens.toLocaleString()}</td>` +
+                `<td>${money(row.cost)}</td></tr>`
+            )
+            .join("") +
+          "</tbody>";
+
+        $("cost-sessions").innerHTML =
+          "<thead><tr><th>session</th><th>model</th><th>tokens</th><th>cost</th></tr></thead><tbody>" +
+          data.sessions
+            .map(
+              (row) =>
+                `<tr><td>${row.sessionId}</td><td>${escapeHtml(row.label)}</td>` +
+                `<td>${row.tokens.toLocaleString()}</td><td>${money(row.cost)}</td></tr>`
+            )
+            .join("") +
+          "</tbody>";
+
+        const latest = data.sessions[0];
+        $("cost-lines").innerHTML = latest
+          ? "<thead><tr><th>direction</th><th>modality</th><th>tokens</th><th>$/1M</th><th>cost</th></tr></thead><tbody>" +
+            latest.lines
+              .map(
+                (line) =>
+                  `<tr><td>${line.direction}</td><td>${line.modality}</td>` +
+                  `<td>${line.tokens.toLocaleString()}</td><td>${line.rate}</td>` +
+                  `<td>${money(line.cost)}</td></tr>`
+              )
+              .join("") +
+            "</tbody>"
+          : "<tbody><tr><td class='note'>No voice session yet.</td></tr></tbody>";
+
+        $("cost-note").innerHTML =
+          `Token counts come from the Live API itself, reported by the browser as ` +
+          `<code>usage_metadata</code> and kept per session — the API reports them ` +
+          `cumulatively, so the latest figure replaces the previous one rather than ` +
+          `adding to it.<br /><br />Prices are the paid tier from ` +
+          `<a href="${data.source}" target="_blank" rel="noreferrer">${data.source}</a>, ` +
+          `checked ${data.checked}. On the free tier this usage costs nothing; the ` +
+          `figure above is what it would cost if the key were billed.` +
+          (data.voiceRunning ? "" : "<br /><br />The voice server is not running.");
+      }
+
+      // -- phone -------------------------------------------------------------- //
+
+      function drawPhone(phone) {
+        const on = Boolean(phone && phone.enabled);
+        $("phone-off").style.display = on ? "none" : "block";
+        $("phone-on").style.display = on ? "block" : "none";
+        if (!on) return;
+        $("phone-head").innerHTML =
+          `This machine is <b>${phone.host}</b> on your network. Scan a code, or type ` +
+          `the address. ${
+            phone.secure
+              ? "The certificate is self-signed, so the phone will warn once — choose " +
+                "Advanced, then Proceed. That is what makes the microphone work."
+              : ""
+          }`;
+        $("phone-links").innerHTML = phone.links
+          .map(
+            (link) =>
+              `<div class="card" style="width: 200px"><div class="qr">${link.qr || ""}</div>` +
+              `<div class="name" style="margin-top: 8px">${escapeHtml(link.label)}</div>` +
+              `<div class="meta">${escapeHtml(link.url)}</div></div>`
+          )
+          .join("");
+        if (!phone.links.some((link) => link.qr)) {
+          $("phone-links").insertAdjacentHTML(
+            "afterbegin",
+            '<p class="note">QR rendering is unavailable — the addresses still work.</p>'
+          );
+        }
+      }
+
+      // -- state and controls ------------------------------------------------- //
+
+      async function act(name, payload = {}) {
+        try {
+          const response = await fetch("/api/action", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name, ...payload }),
+          });
+          const body = await response.json();
+          flash(body.message || "done", !body.ok);
+          pollState();
+          return body;
+        } catch (error) {
+          flash(String(error), true);
+        }
+      }
+
+      document.querySelectorAll("[data-act]").forEach((button) => {
+        button.onclick = () => {
+          const name = button.dataset.act;
+          if (name === "reset-db" && !confirm("Rebuild the database? Local changes are lost."))
+            return;
+          if (name === "stop-all" && !confirm("Stop the API, both apps and the watch?")) return;
+          act(name);
+        };
+      });
+
+      function renderState(state) {
+        $("services").innerHTML = state.services
+          .map(
+            (service) =>
+              `<span class="svc"><span class="dot ${service.running ? "up" : ""}"></span>` +
+              `${service.label}${service.port ? " :" + service.port : ""}</span>`
+          )
+          .join("");
+        const minutes = Math.floor(state.uptime / 60);
+        $("uptime").textContent = `up ${minutes ? minutes + "m " : ""}${state.uptime % 60}s`;
+
+        $("svc-cards").innerHTML = state.services
+          .map(
+            (service) =>
+              `<div class="card rowline"><div><div class="name">${service.label}</div>` +
+              `<div class="meta">${service.running ? "running · pid " + service.pid : "stopped"}` +
+              `${service.port ? " · port " + service.port : ""}</div></div>` +
+              `<button class="action" data-restart="${service.tag}">Restart</button></div>`
+          )
+          .join("");
+        document.querySelectorAll("[data-restart]").forEach((button) => {
+          button.onclick = () => act("restart", { service: button.dataset.restart });
+        });
+
+        $("window-cards").innerHTML = state.windows
+          .map(
+            (entry, index) =>
+              `<div class="card rowline"><div><div class="name">${entry.label}</div>` +
+              `<div class="meta">${entry.url}</div></div>` +
+              `<button class="action" data-window="${index}">Open</button></div>`
+          )
+          .join("");
+        document.querySelectorAll("[data-window]").forEach((button) => {
+          button.onclick = () => act("open-window", { index: Number(button.dataset.window) });
+        });
+
+        const db = state.database;
+        $("db-note").textContent = db.path
+          ? `${db.kind} · ${db.path} · ${(db.size / 1024).toFixed(0)} KB`
+          : "PostgreSQL — the browser below only reads a local SQLite file.";
+
+        drawPhone(state.phone);
+        if (!peopleDrawn) drawPeople(state.people || []);
+      }
+
+      // The runner resolved each person's id at start-up, so nothing here has
+      // to reach the API across origins.
+      let peopleDrawn = false;
+      function drawPeople(people) {
+        peopleDrawn = true;
+        const cards = people
+          .filter((person) => person.role === "parent" && person.senior_id)
+          .map(
+            (person) =>
+              `<div class="card"><div class="rowline"><div><div class="name">${person.person}</div>` +
+              `<div class="meta">${person.label}</div></div></div>` +
+              `<div class="bar" style="margin-top: 8px">` +
+              `<button class="action danger" data-sos="${person.subject}" ` +
+              `data-senior="${person.senior_id}">Raise SOS</button>` +
+              `<button class="action" data-flag="${person.subject}" ` +
+              `data-senior="${person.senior_id}">Flag a reading</button></div></div>`
+          );
+        $("sos-cards").innerHTML =
+          cards.join("") || '<div class="note">No Parent App in this run.</div>';
+        document.querySelectorAll("[data-sos]").forEach((button) => {
+          button.onclick = () =>
+            act("test-sos", { subject: button.dataset.sos, senior_id: button.dataset.senior });
+        });
+        document.querySelectorAll("[data-flag]").forEach((button) => {
+          button.onclick = () =>
+            act("test-flag", { subject: button.dataset.flag, senior_id: button.dataset.senior });
+        });
+      }
+
+      async function pollState() {
+        try {
+          renderState(await (await fetch("/api/state")).json());
+        } catch {
+          $("uptime").textContent = "runner not reachable";
+        }
+      }
+
+      // -- database ----------------------------------------------------------- //
+
+      async function loadTables() {
+        try {
+          const data = await (await fetch("/api/db/tables")).json();
+          if (data.error) throw new Error(data.error);
+          $("tables").innerHTML =
+            "<h3>Tables</h3>" +
+            data.tables
+              .map(
+                (table) =>
+                  `<button data-table="${table.name}" class="${
+                    table.name === currentTable ? "on" : ""
+                  }">${table.name}<span class="n">${table.rows}</span></button>`
+              )
+              .join("");
+          document.querySelectorAll("[data-table]").forEach((button) => {
+            button.onclick = () => showTable(button.dataset.table);
+          });
+        } catch (error) {
+          $("tables").innerHTML = `<h3>Tables</h3><p class="note">${error.message}</p>`;
+        }
+      }
+
+      async function showTable(name) {
+        currentTable = name;
+        loadTables();
+        try {
+          const data = await (
+            await fetch(`/api/db/rows?table=${encodeURIComponent(name)}&limit=100`)
+          ).json();
+          if (data.error) throw new Error(data.error);
+          drawRows(data, `${name} · first 100 rows`);
+        } catch (error) {
+          $("rows").innerHTML = `<p class="note">${error.message}</p>`;
+        }
+      }
+
+      $("run-sql").onclick = async () => {
+        const sql = $("sql").value.trim();
+        if (!sql) return;
+        try {
+          const response = await fetch("/api/db/query", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sql }),
+          });
+          const data = await response.json();
+          if (data.error) throw new Error(data.error);
+          currentTable = null;
+          drawRows(data, "query result");
+        } catch (error) {
+          $("rows").innerHTML = `<p class="note">${error.message}</p>`;
+        }
+      };
+      $("sql").onkeydown = (event) => {
+        if (event.key === "Enter") $("run-sql").click();
+      };
+
+      function drawRows(data, caption) {
+        if (!data.rows.length) {
+          $("rows").innerHTML = `<p class="note">${caption} — nothing to show.</p>`;
+          return;
+        }
+        $("rows").innerHTML =
+          `<p class="note">${caption}</p><table><thead><tr>` +
+          data.columns.map((column) => `<th>${escapeHtml(column)}</th>`).join("") +
+          "</tr></thead><tbody>" +
+          data.rows
+            .map(
+              (row) =>
+                "<tr>" + row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join("") + "</tr>"
+            )
+            .join("") +
+          "</tbody>";
+      }
+
+      pollLogs();
+      pollState();
+      loadVoice();
+      setInterval(pollLogs, 1000);
+      setInterval(pollState, 3000);
+      setInterval(() => {
+        if ($("tab-requests").classList.contains("on")) loadRequests();
+        if ($("tab-cost").classList.contains("on")) loadCost();
+      }, 3000);
+
+      // -- health ----------------------------------------------------------- //
+      //
+      // Polled on its own slow timer rather than with the log poll: sampling the
+      // machine every few hundred milliseconds would make this tab part of the
+      // problem it exists to catch.
+
+      let healthTimer = null;
+
+      const bandFor = (value, warn, critical) =>
+        value >= critical ? "critical" : value >= warn ? "warn" : "ok";
+
+      function meter(label, value, text, band, note) {
+        const width = Math.max(0, Math.min(100, value));
+        return `
+          <div class="meter">
+            <div class="top">
+              <span class="label">${escapeHtml(label)}</span>
+              <span class="value">${escapeHtml(text)}</span>
+            </div>
+            <div class="track"><i class="fill ${band}" style="width:${width}%"></i></div>
+            ${note ? `<div class="note">${escapeHtml(note)}</div>` : ""}
+          </div>`;
+      }
+
+      async function loadHealth() {
+        let health;
+        try {
+          health = await fetch("/api/health").then((r) => r.json());
+        } catch {
+          return;
+        }
+        const alarms = $("health-alarms");
+        const badge = $("health-count");
+
+        if (!health.available) {
+          alarms.innerHTML =
+            `<div class="alarm warn"><span class="tag">off</span>${escapeHtml(
+              health.reason || "no readings"
+            )}</div>`;
+          $("health-meters").innerHTML = "";
+          badge.textContent = "";
+          return;
+        }
+
+        const t = health.thresholds;
+        const warnings = health.warnings || [];
+
+        // The loudest thing first, and always something: an empty panel reads
+        // as "not working" rather than "nothing wrong".
+        alarms.innerHTML =
+          warnings.length === 0
+            ? `<div class="alarm ok"><span class="tag">ok</span>Nothing to report. CPU, memory and disk are all inside their limits.</div>`
+            : warnings
+                .sort((a, b) => (a.level === "critical" ? -1 : 1))
+                .map(
+                  (w) =>
+                    `<div class="alarm ${w.level}"><span class="tag">${escapeHtml(
+                      w.level
+                    )}</span>${escapeHtml(w.message)}</div>`
+                )
+                .join("");
+
+        const critical = warnings.filter((w) => w.level === "critical").length;
+        badge.textContent = warnings.length
+          ? critical
+            ? `!${critical}`
+            : String(warnings.length)
+          : "";
+
+        const diskPercentFree = health.disk_total_gb
+          ? (health.disk_free_gb / health.disk_total_gb) * 100
+          : 100;
+        const ownShare =
+          health.cpu && health.own_cpu != null && health.cpu > 0
+            ? Math.round((health.own_cpu / health.cpu) * 100)
+            : 0;
+
+        $("health-meters").innerHTML =
+          meter(
+            "CPU" + (health.throttled ? " — limited by firmware" : ""),
+            health.cpu ?? 0,
+            `${(health.cpu ?? 0).toFixed(0)}%`,
+            health.throttled
+              ? "critical"
+              : bandFor(health.cpu ?? 0, t.cpu_warn, t.cpu_critical),
+            health.own_cpu != null
+              ? `Gamira: ${health.own_cpu.toFixed(0)}%${
+                  ownShare ? ` — about ${ownShare}% of what is being used` : ""
+                }`
+              : ""
+          ) +
+          meter(
+            "Memory",
+            health.memory_percent ?? 0,
+            `${(health.memory_percent ?? 0).toFixed(0)}%  ·  ${health.memory_used_gb} / ${health.memory_total_gb} GB`,
+            bandFor(health.memory_percent ?? 0, t.memory_warn, t.memory_critical),
+            health.own_memory_mb != null
+              ? `Gamira: ${(health.own_memory_mb / 1024).toFixed(1)} GB`
+              : ""
+          ) +
+          meter(
+            "Commit charge",
+            health.commit_total_gb
+              ? (health.commit_used_gb / health.commit_total_gb) * 100
+              : 0,
+            `${health.commit_used_gb} / ${health.commit_total_gb} GB`,
+            bandFor(
+              health.commit_total_gb
+                ? (health.commit_used_gb / health.commit_total_gb) * 100
+                : 0,
+              80,
+              92
+            ),
+            "Physical memory plus page file. Running this out is what makes Windows stop responding."
+          ) +
+          // Inverted on purpose: the bar shows how full the drive is, so a long
+          // red bar means trouble in the same direction as the others.
+          meter(
+            `Disk ${health.disk_path || ""}`,
+            100 - diskPercentFree,
+            `${health.disk_free_gb} GB free of ${health.disk_total_gb} GB`,
+            diskPercentFree <= t.disk_critical_gb / 10 || health.disk_free_gb <= t.disk_critical_gb
+              ? "critical"
+              : health.disk_free_gb <= t.disk_warn_gb || diskPercentFree <= 12
+              ? "warn"
+              : "ok",
+            "The system drive, where the page file and every temp file live."
+          );
+
+        const trend = health.trend || [];
+        $("health-spark").innerHTML = trend
+          .map((point) => {
+            const value = point.cpu ?? 0;
+            const height = Math.max(2, Math.round((value / 100) * 40));
+            const hot = value >= t.cpu_warn ? " hot" : "";
+            return `<i class="${hot.trim()}" style="height:${height}px" title="${value}%"></i>`;
+          })
+          .join("");
+
+        const own = health.own_processes || [];
+        $("health-own").innerHTML = own.length
+          ? "<tr><th>Process</th><th>PID</th><th>CPU</th><th>Memory</th></tr>" +
+            own
+              .slice()
+              .sort((a, b) => b.memory_mb - a.memory_mb)
+              .map(
+                (row) =>
+                  `<tr><td>${escapeHtml(row.tag || "?")}</td><td>${row.pid}</td><td>${row.cpu.toFixed(
+                    0
+                  )}%</td><td>${row.memory_mb} MB</td></tr>`
+              )
+              .join("")
+          : "<tr><td class='note'>No processes are being tracked.</td></tr>";
+
+        $("health-stamp").textContent =
+          "Sampled " + new Date(health.at * 1000).toLocaleTimeString();
+      }
+
+      // Poll while the tab is open, and once a minute regardless so the badge
+      // warns even when somebody is looking at the log.
+      function startHealthPolling() {
+        if (healthTimer) return;
+        healthTimer = setInterval(() => {
+          const open = $("tab-health").classList.contains("on");
+          if (open || Date.now() % 60000 < 5000) loadHealth();
+        }, 5000);
+      }
+      startHealthPolling();
+      loadHealth();
+    </script>
+  </body>
+</html>
