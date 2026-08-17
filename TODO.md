@@ -171,7 +171,7 @@ for that reason; if it moves, minting fails loudly and the console shows why.
 
   ```powershell
   docker compose up -d postgres
-  cd Z:\Gamira\gamira-backend
+  cd Z:\Gamira\Gamira-App\gamira-backend
   $env:DATABASE_URL = 'postgresql+asyncpg://gamira:gamira@localhost:5432/gamira'
   python -m alembic upgrade head
   $env:TEST_POSTGRES_URL = 'postgresql+asyncpg://gamira:gamira@localhost:5432/gamira_test'
@@ -338,6 +338,151 @@ Declaring strict schemas to the Live API took a real API call to work out.
 declaration uses `parameters_json_schema` instead, which takes a raw JSON Schema
 and accepts it. The fake minter could never have found this; a single real
 `auth_tokens.create` call did, and there is now a regression test.
+
+
+## Incident, 2026-08-17 — the machine crashed under test load
+
+Recorded because the cause was partly this project's own tooling, and because
+the fix is a set of guards somebody will otherwise remove as clutter.
+
+**What happened.** At 11:51 the machine shut down uncleanly (`Kernel-Power 41`,
+`EventLog 6008`) during a long run of the backend test suite. It rebooted at
+12:03 and came back with Windows firmware limiting two cores
+(`Kernel-Processor-Power 37`) — the mouse lagged for minutes, and no amount of
+closing programs would have helped, because the CPU was clamped rather than
+busy.
+
+**What contributed.**
+
+- Several `python -m app.worker` and `uvicorn` processes left running from
+  earlier starts, each polling the same SQLite file once a second. One stray
+  worker was still alive hours later; the new reaper found it immediately.
+- `uvicorn --reload` watching the whole backend directory — the 170 MB `.venv`
+  and three caches — instead of the 1.5 MB `app/`.
+- The system drive at 7% free (3.4 GB of it pytest leftovers from this project,
+  3.2 GB an unrelated project's fixture in the same temp tree).
+- 22 VS Code processes, 27 Chrome, and Ollama resident, before any of the above.
+
+**What is not explained by this project.** The same machine also shut down
+uncleanly on 6 and 7 August, both at 02:41, when nothing of ours was running.
+There is a `TPM` event 30 about hibernate/resume counts not matching. Something
+independent is wrong — worth chasing separately, and worth knowing that heavy
+test runs land on an already-fragile machine.
+
+**Guards added.**
+
+- [x] Console **Health** tab: CPU, memory, commit charge, system-drive space,
+      firmware throttling, a CPU trend, and this run's own usage separately from
+      the machine total. [`tools/sysmon.py`](tools/sysmon.py), no dependencies.
+- [x] `run.py` stops stray Gamira processes before starting, and sweeps again on
+      exit. `--keep-orphans` opts out.
+- [x] `run.py` refuses to start below 5 GB free or above 92% memory, and warns
+      between there and comfortable. `--force` overrides.
+- [x] `--reload-dir app`, so the reload watcher stops scanning `.venv`.
+- [x] Console buttons: **Stop stray Gamira processes** and **Delete caches and
+      test leftovers** (3.1 GB back the first time).
+
+**Still owed.**
+
+- [ ] Find out why this machine shuts down uncleanly with nothing running. The
+      two 02:41 crashes are the thread to pull.
+- [ ] Get the system drive comfortably clear. 37 GB of 476 GB is still only 8%,
+      and none of the remaining bulk is this project's.
+- [ ] The test suite is the heaviest thing here. If it stays a problem, run it
+      with fewer workers rather than turning the guards off.
+
+## Console audit, 2026-08-17 — the log screen, the shutdown, and two security holes
+
+Prompted by "redesign the log screen and add a shutdown button". An audit of
+`run.py`, `tools/console/console.html` and `tools/sysmon.py` alongside it turned
+up two things more serious than the request, so those went first.
+
+**Security.**
+
+- [x] **Stored XSS in the console.** The API accepts an inbound `X-Request-Id`
+      header — correct, it is only ever used for correlation — and that value
+      travelled into an HTML attribute in the console with no escaping, in a page
+      that can restart services, rebuild the database and read every row of it.
+      Any page open in the same browser could send the header; CORS blocks reading
+      a reply, not making the request. Now sanitised where it is captured
+      (`safe_request_id`), the console's escaper covers quotes, and the log
+      renderer builds rows as elements rather than strings.
+- [x] **`--phone` published the control plane with no authentication.** The
+      console bound `0.0.0.0` so a phone could watch the logs, which also gave
+      anyone on the Wi-Fi `reset-db`, `stop-all` and unrestricted SELECTs over the
+      care records. Off this machine it is now read-only, and says so.
+
+**Shutdown.**
+
+- [x] "Stop everything" ran `stop_all()` on a **daemon** thread while the main
+      loop exited on the flag `stop_all()` sets first — so interpreter shutdown
+      killed the sweep part-way through and children survived. The console now
+      only *asks*; the main thread does the work and always finishes.
+- [x] The console window was killed before the first service was asked to stop,
+      so nobody ever saw a shutdown. Windows are named and the console goes last.
+- [x] `kill()` was the one taskkill on the shutdown path with no timeout: a wedged
+      taskkill hung the shutdown, and Ctrl+C with it.
+- [x] A **Shut down** button in the header, with a sheet that names what closes.
+      `run.py` exits 7 and `run.cmd` skips its `pause`, so the terminal closes too
+      — and only ever the terminal `run.cmd` opened.
+
+**The log screen.** The cause was architectural: `render_api()` formatted for a
+terminal and the console got the flat string, so it could not align columns or
+colour a 500 differently from a 200, and every row showed its clock twice.
+
+- [x] Renderers now return terminal lines *and* structured records separately.
+      Columns are a grid; status has colour; the note folds into its request's row.
+- [x] Appending rather than rebuilding 1500 rows a second — text selection
+      survives, and the console stops being a CPU cost in the tool that warns
+      about CPU.
+- [x] **Pause was destroying lines.** It advanced the cursor before dropping them,
+      so "N waiting" counted lines already lost and resuming could not recover
+      them. They are held now.
+- [x] Follow yields when you scroll up. The pinned-request state has a chip to
+      dismiss it. Four control bars are two.
+- [x] Bursts over 900 lines/second used to vanish silently; the gap is now a row.
+- [x] `worker` lines had no chip, no count and no colour in either surface.
+
+**The Health tab was measuring the wrong processes.** It tracked direct children,
+but the real Vite servers are node grandchildren of npm and the real API is a
+child of uvicorn's reload supervisor — so it reported `Gamira: 0.0 GB` and 0% CPU
+for everything while the machine sat at 60%.
+
+- [x] Descendants rolled up per service (`CreateToolhelp32Snapshot`, still no
+      dependencies), with a process count per row.
+- [x] A missing reading said `null GB free of null GB` in critical red, because
+      `null <= 10` is true in JavaScript. It says "unavailable".
+- [x] The disk alarm and the meter beside it could disagree: the percentage
+      thresholds were not exported, so the page improvised "1% free". Exported.
+- [x] `snapshot()` sampled synchronously **on the console's HTTP thread** whenever
+      no reading existed yet — which is exactly when the page first asks. That
+      mutated the CPU tick counters outside the lock, racing the sampler into a
+      garbage first reading, threw the sample away so the next request repeated
+      it, and ran a `Get-WinEvent` probe whose timeout is 15s inside a request the
+      browser was waiting on. It now records through the sampler's own path, under
+      the lock, and never probes unless asked. Measured honestly: the probe costs
+      about 0.36s on a healthy machine, not 15 — but 15 is the ceiling, and it
+      would only be reached on a machine already struggling, which is the one time
+      the Health tab matters.
+- [x] `monitor.stop()` was never called, and `stop()` left the monitor
+      unrestartable.
+
+**Also fixed.** `restart()` was unsynchronised and mutated the list `stop_all()`
+walks; a failed `reset-db` left the API stopped; a malformed `Content-Length`
+closed a socket with no reply and a traceback into the log; any `/api/state`
+error was reported as "runner not reachable"; the orphan reaper could not see a
+stranded Vite server holding 5173; two services given the same port passed the
+preflight; uptime was wall-clock and could render `up -1m -5s`; `browsers` grew
+without bound; error messages printed as `['...']`; `tools/e2e_voice_demo.py` and
+~14 documented paths still pointed at the pre-move folder.
+
+**Still owed.**
+
+- [ ] The console has no authentication even on loopback. Read-only from the
+      network is a mitigation, not authentication; a token in the URL would be
+      the real answer if this ever needs to be driven from a phone.
+- [ ] The shutdown sheet's checklist is paced to match what the runner does, not
+      driven by it. Real progress would need the runner to report each step.
 
 ## Documentation
 

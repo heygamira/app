@@ -491,13 +491,34 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args: Any) -> None:  # noqa: A003 - silence access log
         """The face polls once a second; its own log would drown the sim's."""
 
+    def handle_one_request(self) -> None:
+        """A closed watch face is not an error worth ten lines about.
+
+        The face polls once a second, so closing its window — or the console
+        shutting the whole stack down — resets a connection mid-request, and the
+        stdlib prints a full traceback for it. That went into the runner's log,
+        which is where somebody is trying to read what the shutdown did.
+        """
+        try:
+            super().handle_one_request()
+        except (
+            ConnectionResetError,
+            ConnectionAbortedError,
+            BrokenPipeError,
+            TimeoutError,
+        ):
+            self.close_connection = True
+
     def _send(self, status: int, body: bytes, content_type: str) -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+            self.close_connection = True
 
     def _json(self, status: int, payload: Any) -> None:
         self._send(status, json.dumps(payload).encode("utf-8"), "application/json")

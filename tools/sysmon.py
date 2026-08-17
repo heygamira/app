@@ -35,6 +35,19 @@ from dataclasses import dataclass, field
 
 IS_WINDOWS = sys.platform == "win32"
 
+if IS_WINDOWS:  # pragma: no cover - exercised only on Windows
+    # Declared, because the default return type is a 32-bit int: a HANDLE coming
+    # back through that is truncated or sign-extended on x64. Handles happen to
+    # fit in 32 bits today, so the bug is silent rather than absent — and a
+    # negative handle handed back to CloseHandle fails quietly.
+    _k32 = ctypes.windll.kernel32
+    _k32.OpenProcess.restype = wintypes.HANDLE
+    _k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    _k32.CloseHandle.restype = wintypes.BOOL
+    _k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    _k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    _k32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+
 # Thresholds. Chosen from what this machine actually looked like when it fell
 # over, not from round numbers.
 CPU_WARN = 85.0          # sustained, per cent
@@ -76,8 +89,80 @@ class FILETIME(ctypes.Structure):
     _fields_ = [("dwLowDateTime", wintypes.DWORD), ("dwHighDateTime", wintypes.DWORD)]
 
 
+class PROCESSENTRY32(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("cntUsage", wintypes.DWORD),
+        ("th32ProcessID", wintypes.DWORD),
+        ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+        ("th32ModuleID", wintypes.DWORD),
+        ("cntThreads", wintypes.DWORD),
+        ("th32ParentProcessID", wintypes.DWORD),
+        ("pcPriClassBase", ctypes.c_long),
+        ("dwFlags", wintypes.DWORD),
+        ("szExeFile", ctypes.c_char * 260),
+    ]
+
+
 def _filetime_to_int(value: FILETIME) -> int:
     return (value.dwHighDateTime << 32) | value.dwLowDateTime
+
+
+def _parent_map() -> dict[int, int]:
+    """Every live process and its parent, straight from kernel32.
+
+    Needed because the interesting processes are grandchildren. `npm run dev`
+    is a shim whose node child is the actual Vite server, and `uvicorn --reload`
+    is a supervisor whose child is the actual API. Measuring only the processes
+    this runner spawned therefore reported a few megabytes and nought per cent
+    for a stack using gigabytes — the Health tab was watching the wrong things.
+
+    Cheap: one snapshot, no subprocess, no PowerShell.
+    """
+    if not IS_WINDOWS:
+        return {}
+    kernel32 = ctypes.windll.kernel32
+    TH32CS_SNAPPROCESS = 0x00000002
+    INVALID_HANDLE = ctypes.c_void_p(-1).value
+
+    snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if not snapshot or snapshot == INVALID_HANDLE:
+        return {}
+    parents: dict[int, int] = {}
+    try:
+        entry = PROCESSENTRY32()
+        entry.dwSize = ctypes.sizeof(PROCESSENTRY32)
+        if not kernel32.Process32First(snapshot, ctypes.byref(entry)):
+            return {}
+        while True:
+            parents[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
+            if not kernel32.Process32Next(snapshot, ctypes.byref(entry)):
+                break
+    finally:
+        kernel32.CloseHandle(snapshot)
+    return parents
+
+
+def _with_descendants(roots: list[int]) -> list[int]:
+    """The tracked processes plus everything living underneath them."""
+    parents = _parent_map()
+    if not parents:
+        return list(roots)
+    children: dict[int, list[int]] = {}
+    for pid, parent in parents.items():
+        children.setdefault(parent, []).append(pid)
+
+    found: list[int] = []
+    seen: set[int] = set()
+    queue = [pid for pid in roots if pid]
+    while queue:
+        pid = queue.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        found.append(pid)
+        queue.extend(children.get(pid, ()))
+    return found
 
 
 @dataclass
@@ -137,15 +222,24 @@ class SystemMonitor:
     # -- lifecycle ---------------------------------------------------------- #
 
     def start(self) -> None:
-        if self._thread is not None:
+        if self._thread is not None and self._thread.is_alive():
             return
-        self._thread = threading.Thread(
-            target=self._run, name="sysmon", daemon=True
-        )
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name="sysmon", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
+        """Stop sampling, and be genuinely restartable afterwards.
+
+        This used to only set the event, leaving `_thread` set and `_stop` set, so
+        a later `start()` was a silent no-op — the monitor was dead with nothing
+        to say so.
+        """
         self._stop.set()
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=self.interval + 1.0)
+        self._thread = None
 
     def track(self, pids: list[int]) -> None:
         """Tell the monitor which processes belong to this run."""
@@ -153,19 +247,27 @@ class SystemMonitor:
             self._own_pids = list(pids)
 
     def _run(self) -> None:
-        # Prime the CPU delta so the first real sample is not nonsense.
+        # Prime the CPU delta so the first real sample is not nonsense, and take
+        # one reading straight away without the PowerShell probe. Without this the
+        # first three seconds have no sample at all, and the console's first
+        # request for health would take one on the HTTP thread instead.
         self._cpu_percent()
+        self._record(probe_throttle=False)
         while not self._stop.wait(self.interval):
-            try:
-                sample = self.sample()
-            except Exception:
-                # A monitor must never be the reason the stack stops. A failed
-                # sample is skipped; the next one usually works.
-                continue
-            with self._lock:
-                self.samples.append(sample)
-                if len(self.samples) > self.history_size:
-                    del self.samples[: -self.history_size]
+            self._record()
+
+    def _record(self, probe_throttle: bool = True) -> Sample | None:
+        try:
+            sample = self.sample(probe_throttle=probe_throttle)
+        except Exception:
+            # A monitor must never be the reason the stack stops. A failed
+            # sample is skipped; the next one usually works.
+            return None
+        with self._lock:
+            self.samples.append(sample)
+            if len(self.samples) > self.history_size:
+                del self.samples[: -self.history_size]
+        return sample
 
     # -- readings ----------------------------------------------------------- #
 
@@ -223,76 +325,118 @@ class SystemMonitor:
         gb = 1024**3
         return (round(usage.free / gb, 1), round(usage.total / gb, 1), path)
 
-    def _own_usage(self, now: float) -> tuple[float, float, list[dict]]:
-        """CPU and memory for this run's own processes only.
+    def _one_process(
+        self, pid: int, now: float, cores: int
+    ) -> tuple[float, float] | None:
+        """CPU per cent and resident megabytes for one process, or None if gone."""
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x0400 | 0x0010, False, pid)
+        if not handle:
+            self._prev_own.pop(pid, None)
+            return None
+        try:
+            creation, exit_time = FILETIME(), FILETIME()
+            kernel_t, user_t = FILETIME(), FILETIME()
+            if not kernel32.GetProcessTimes(
+                handle,
+                ctypes.byref(creation),
+                ctypes.byref(exit_time),
+                ctypes.byref(kernel_t),
+                ctypes.byref(user_t),
+            ):
+                return None
+            # 100-nanosecond ticks to seconds.
+            cpu_seconds = (_filetime_to_int(kernel_t) + _filetime_to_int(user_t)) / 1e7
+            memory_mb = _process_memory_mb(handle)
+        finally:
+            kernel32.CloseHandle(handle)
 
-        Separating them is the useful part: "the machine is at 95 per cent" and
-        "*we* are at 95 per cent" call for different reactions.
+        percent = 0.0
+        previous = self._prev_own.get(pid)
+        if previous is not None:
+            prev_cpu, prev_at = previous
+            elapsed = now - prev_at
+            if elapsed > 0:
+                # Per cent of the whole machine, so it adds up against the CPU
+                # figure above rather than reading as 400%.
+                percent = round(
+                    max(0.0, (cpu_seconds - prev_cpu) / elapsed / cores * 100), 1
+                )
+        self._prev_own[pid] = (cpu_seconds, now)
+        return (percent, memory_mb)
+
+    def _own_usage(self, now: float) -> tuple[float, float, list[dict]]:
+        """CPU and memory for this run's own processes, including their children.
+
+        Separating them from the machine total is the useful part: "the machine is
+        at 95 per cent" and "*we* are at 95 per cent" call for different
+        reactions. Counting descendants is what makes the answer true — `npm run
+        dev` is a shim and the node process underneath it is the actual Vite
+        server, `uvicorn --reload` is a supervisor and its child is the actual
+        API. Measuring only the processes this runner spawned reported four
+        megabytes for a Vite server and nought per cent for everything, which was
+        worse than showing nothing.
         """
         with self._lock:
-            pids = list(self._own_pids)
-        if not IS_WINDOWS or not pids:
+            roots = list(self._own_pids)
+        if not IS_WINDOWS or not roots:
+            with self._lock:
+                self._prev_own.clear()
             return (0.0, 0.0, [])
 
-        kernel32 = ctypes.windll.kernel32
         cores = os.cpu_count() or 1
         total_cpu = 0.0
         total_mb = 0.0
         rows: list[dict] = []
+        alive: set[int] = set()
 
-        for pid in pids:
-            handle = kernel32.OpenProcess(0x0400 | 0x0010, False, pid)
-            if not handle:
-                self._prev_own.pop(pid, None)
-                continue
-            try:
-                creation, exit_time = FILETIME(), FILETIME()
-                kernel_t, user_t = FILETIME(), FILETIME()
-                if not kernel32.GetProcessTimes(
-                    handle,
-                    ctypes.byref(creation),
-                    ctypes.byref(exit_time),
-                    ctypes.byref(kernel_t),
-                    ctypes.byref(user_t),
-                ):
+        # One tree per tracked process, reported as one row: the interesting unit
+        # is "the dashboard server", not "npm and the node it started".
+        for root in roots:
+            tree = _with_descendants([root])
+            tree_cpu = 0.0
+            tree_mb = 0.0
+            counted = 0
+            for pid in tree:
+                reading = self._one_process(pid, now, cores)
+                if reading is None:
                     continue
-                # 100-nanosecond ticks to seconds.
-                cpu_seconds = (
-                    _filetime_to_int(kernel_t) + _filetime_to_int(user_t)
-                ) / 1e7
-                memory_mb = _process_memory_mb(handle)
+                alive.add(pid)
+                tree_cpu += reading[0]
+                tree_mb += reading[1]
+                counted += 1
+            if not counted:
+                continue
+            total_cpu += tree_cpu
+            total_mb += tree_mb
+            rows.append(
+                {
+                    "pid": root,
+                    "cpu": round(tree_cpu, 1),
+                    "memory_mb": round(tree_mb),
+                    "processes": counted,
+                }
+            )
 
-                percent = 0.0
-                previous = self._prev_own.get(pid)
-                if previous is not None:
-                    prev_cpu, prev_at = previous
-                    elapsed = now - prev_at
-                    if elapsed > 0:
-                        # Per cent of the whole machine, so it adds up against
-                        # the CPU figure above rather than reading as 400%.
-                        percent = round(
-                            max(0.0, (cpu_seconds - prev_cpu) / elapsed / cores * 100), 1
-                        )
-                self._prev_own[pid] = (cpu_seconds, now)
-
-                total_cpu += percent
-                total_mb += memory_mb
-                rows.append({"pid": pid, "cpu": percent, "memory_mb": round(memory_mb)})
-            finally:
-                kernel32.CloseHandle(handle)
+        # Forget processes no longer being tracked, so the previous-tick table
+        # does not keep every pid this run has ever spawned.
+        for pid in [pid for pid in self._prev_own if pid not in alive]:
+            self._prev_own.pop(pid, None)
 
         return (round(total_cpu, 1), round(total_mb), rows)
 
-    def _throttle(self, now: float) -> tuple[bool, str]:
+    def _throttle(self, now: float, probe: bool = True) -> tuple[bool, str]:
         """Has firmware limited the CPU recently?
 
         This is the signal that mattered on 17 Aug: the machine was not busy,
         it was *clamped*, and no amount of closing programs would have fixed it.
         Event 37 from Kernel-Processor-Power is Windows saying so.
 
-        Expensive (it shells out), so it runs once a minute at most.
+        Expensive (it shells out to PowerShell), so it runs once a minute at most,
+        and callers who cannot afford to block at all pass ``probe=False`` to take
+        whatever the last check found.
         """
-        if not IS_WINDOWS or now - self._throttle_checked_at < 60:
+        if not probe or not IS_WINDOWS or now - self._throttle_checked_at < 60:
             return self._throttle_state
         self._throttle_checked_at = now
         script = (
@@ -324,13 +468,13 @@ class SystemMonitor:
 
     # -- sampling ----------------------------------------------------------- #
 
-    def sample(self) -> Sample:
+    def sample(self, probe_throttle: bool = True) -> Sample:
         now = time.time()
         cpu = self._cpu_percent()
         load, used, total, commit_used, commit_total = self._memory()
         free_gb, total_gb, disk_path = self._disk()
         own_cpu, own_mb, own_rows = self._own_usage(now)
-        throttled, throttle_note = self._throttle(now)
+        throttled, throttle_note = self._throttle(now, probe=probe_throttle)
 
         sample = Sample(
             at=now,
@@ -435,16 +579,23 @@ class SystemMonitor:
 
     # -- what the console reads --------------------------------------------- #
 
-    def snapshot(self) -> dict:
-        """The current reading plus a short trend, for the Health tab."""
+    def snapshot(self, probe_throttle: bool = False) -> dict:
+        """The current reading plus a short trend, for the Health tab.
+
+        Never runs the PowerShell throttle probe unless asked: this is called from
+        the console's HTTP thread, and a request for health that can block for
+        fifteen seconds is its own kind of stall. The sampler thread does that
+        check on its own cadence and leaves the answer here.
+        """
         with self._lock:
             samples = list(self.samples)
         latest = samples[-1] if samples else None
         if latest is None:
-            # Sample synchronously so the first page load is not empty.
-            try:
-                latest = self.sample()
-            except Exception:
+            # Nothing recorded yet — take one now, through _record so it is stored
+            # under the lock rather than mutating the tick counters from here and
+            # being thrown away.
+            latest = self._record(probe_throttle=probe_throttle)
+            if latest is None:
                 return {"available": False, "reason": "no reading yet"}
 
         return {
@@ -471,6 +622,12 @@ class SystemMonitor:
                 "memory_critical": MEMORY_CRITICAL,
                 "disk_warn_gb": DISK_WARN_GB,
                 "disk_critical_gb": DISK_CRITICAL_GB,
+                # Exported so the page stops improvising them. It had been
+                # deriving "1% free" from disk_critical_gb / 10 and hard-coding
+                # 12, which is how the alarm and the meter beside it could
+                # disagree about the same drive.
+                "disk_warn_percent": DISK_WARN_PERCENT,
+                "disk_critical_percent": DISK_CRITICAL_PERCENT,
             },
             "trend": [
                 {
@@ -504,9 +661,10 @@ def _process_memory_mb(handle: int) -> float:
     counters = PROCESS_MEMORY_COUNTERS()
     counters.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS)
     try:
-        ok = ctypes.windll.psapi.GetProcessMemoryInfo(
-            handle, ctypes.byref(counters), counters.cb
-        )
+        probe = ctypes.windll.psapi.GetProcessMemoryInfo
+        probe.restype = wintypes.BOOL
+        probe.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD]
+        ok = probe(handle, ctypes.byref(counters), counters.cb)
     except (AttributeError, OSError):
         return 0.0
     return counters.WorkingSetSize / (1024**2) if ok else 0.0
@@ -520,14 +678,21 @@ if __name__ == "__main__":  # pragma: no cover - a hand tool
     monitor = SystemMonitor(interval_seconds=2.0)
     monitor.start()
     print("Sampling. Ctrl+C to stop.\n")
+    # A reading that could not be taken is None, and formatting None with a width
+    # raises — so the tool would crash on exactly the machine it is meant to
+    # diagnose. Say "—" instead.
+    def figure(value: object, width: int = 5) -> str:
+        return f"{'—' if value is None else value:>{width}}"
+
     try:
         while True:
             time.sleep(2.0)
-            snap = monitor.snapshot()
+            snap = monitor.snapshot(probe_throttle=True)
             if not snap.get("available"):
+                print(f"  no reading: {snap.get('reason', 'unavailable')}")
                 continue
             print(
-                f"cpu {snap['cpu']:>5}%   mem {snap['memory_percent']:>3}% "
+                f"cpu {figure(snap['cpu'])}%   mem {figure(snap['memory_percent'], 3)}% "
                 f"({snap['memory_used_gb']}/{snap['memory_total_gb']} GB)   "
                 f"{snap['disk_path']} {snap['disk_free_gb']} GB free"
                 + ("   THROTTLED" if snap["throttled"] else "")

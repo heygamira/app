@@ -6,7 +6,7 @@ One FastAPI service, one PostgreSQL database, all authorization server-side.
 ## Run it locally
 
 ```powershell
-cd Z:\Gamira\gamira-backend
+cd Z:\Gamira\Gamira-App\gamira-backend
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements-dev.txt

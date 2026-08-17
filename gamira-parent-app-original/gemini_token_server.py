@@ -106,6 +106,23 @@ def mint_token() -> dict:
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
+    def handle_one_request(self) -> None:
+        """A client that walks away is not worth a traceback.
+
+        Same guard as the runner's console and the watch simulator: a window
+        closing mid-request resets the connection, and the stdlib prints ten
+        lines about it into the log somebody is reading.
+        """
+        try:
+            super().handle_one_request()
+        except (
+            ConnectionResetError,
+            ConnectionAbortedError,
+            BrokenPipeError,
+            TimeoutError,
+        ):
+            self.close_connection = True
+
     def _cors(self) -> None:
         origin = self.headers.get("Origin", "")
         allowed = origin if origin in ALLOW_ORIGINS else ALLOW_ORIGINS[0]

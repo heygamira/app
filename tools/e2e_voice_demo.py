@@ -12,7 +12,7 @@ Usage (PowerShell):
 
     # terminal 1
     cd gamira-backend
-    $env:DATABASE_URL = 'sqlite+aiosqlite:///Z:/Gamira/gamira-backend/.e2e.db'
+    $env:DATABASE_URL = 'sqlite+aiosqlite:///Z:/Gamira/Gamira-App/gamira-backend/.e2e.db'
     $env:APP_ENV = 'local'; $env:AUTH_MODE = 'dev'; $env:AI_PROVIDER = 'fake'
     python -m alembic upgrade head
     python -m uvicorn app.main:app --host 127.0.0.1 --port 8099
@@ -35,6 +35,7 @@ import os
 import sys
 import time
 import uuid
+from pathlib import Path
 
 import httpx
 
@@ -42,7 +43,12 @@ API = os.environ.get("GAMIRA_E2E_API", "http://127.0.0.1:8099")
 BASE = f"{API}/api/v1"
 # Linking a senior profile to a signed-in account is assisted setup and no
 # endpoint exposes it, so that one step is written directly.
-DATABASE_FILE = os.environ.get("GAMIRA_E2E_DB", r"Z:\Gamira\gamira-backend\.e2e.db")
+#
+# Worked out from this file's own location rather than hardcoded: an absolute
+# path in a default is a path that stops being true the first time the project
+# is moved, and it silently created its database somewhere else instead.
+DEFAULT_DATABASE = Path(__file__).resolve().parent.parent / "gamira-backend" / ".e2e.db"
+DATABASE_FILE = os.environ.get("GAMIRA_E2E_DB", str(DEFAULT_DATABASE))
 OK = "\033[32m✓\033[0m"
 NO = "\033[31m✗\033[0m"
 failures: list[str] = []

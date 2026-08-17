@@ -123,32 +123,61 @@
       button.action.danger:hover { background: #2a1113; }
       button.action:disabled { opacity: .45; cursor: not-allowed; }
 
+      /* The log surface.
+         Columns are a grid rather than padded text: the runner sends the fields
+         (method, path, status, duration) and the browser lays them out, so a
+         long path cannot push the status out of line and a 500 can be a
+         different colour from a 200. */
       #log {
         flex: 1; min-height: 0; overflow-y: auto;
         background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
-        padding: 8px 10px;
-        font: 12px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace;
+        padding: 6px 4px 6px 0;
+        font: 12px/1.55 ui-monospace, "Cascadia Mono", Consolas, monospace;
       }
-      .row { display: flex; gap: 8px; white-space: pre-wrap; word-break: break-word; }
-      .row.pick { background: #16202b; }
-      .row .t { color: #55606d; flex: none; }
-      .row .tag { flex: none; width: 56px; }
-      .row .msg { flex: 1; color: #c9d3de; }
+      .row {
+        display: grid;
+        grid-template-columns: 64px 56px 46px minmax(0, 1fr) 34px 64px;
+        gap: 0 8px;
+        padding: 1px 8px 1px 6px;
+        border-left: 2px solid transparent;
+      }
+      .row:hover { background: #141d27; }
+      .row.pick { background: #16202b; border-left-color: var(--blue); }
+      .row .t { color: #55606d; font-variant-numeric: tabular-nums; }
+      .row .tag { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .row .verb { color: #93a3b4; }
+      .row .msg { min-width: 0; color: #c9d3de; white-space: pre-wrap; word-break: break-word; }
+      .row .st, .row .ms { text-align: right; font-variant-numeric: tabular-nums; }
+      .row .ms { color: #55606d; }
+      /* Prose — a traceback, a worker line, anything with no request in it —
+         gets the width the columns would have taken. */
+      .row.prose .msg { grid-column: 3 / -1; }
+      /* The plain-language note belongs to the request above it, so it sits
+         inside the same row instead of being a second line to scroll past. */
+      .row .note { grid-column: 4 / -1; color: var(--accent); font-size: 11px; }
+      .row.k-sos .note { color: #fca5a5; font-weight: 700; }
       .row .rep {
-        flex: none; align-self: center; font-size: 10px; color: var(--muted);
-        border: 1px solid var(--line); border-radius: 999px; padding: 0 6px;
+        font-size: 10px; color: var(--muted); margin-left: 6px;
+        border: 1px solid var(--line); border-radius: 999px; padding: 0 5px;
       }
       mark { background: #3b3f16; color: #fde68a; border-radius: 2px; }
       .tag-api { color: var(--blue); }
+      .tag-worker { color: #4ade80; }
       .tag-parent { color: #67e8f9; }
       .tag-dash { color: var(--violet); }
       .tag-watch { color: var(--warn); }
       .tag-voice { color: #f0abfc; }
       .tag-run, .tag-db { color: #7d8b9a; }
+      /* A left rail, so an error is findable while scrolling past rather than
+         only readable once you have stopped on it. */
+      .row.k-error { border-left-color: var(--danger); }
+      .row.k-sos { border-left-color: var(--danger); background: rgba(248, 113, 113, .08); }
+      .row.k-unusual { border-left-color: var(--warn); }
       .k-error .msg { color: #fca5a5; }
       .k-sos .msg { color: #fca5a5; font-weight: 700; }
       .k-unusual .msg { color: var(--warn); }
       .k-read .msg { color: #7f8b99; }
+      .k-read .verb { color: #55606d; }
 
       .panels { display: grid; grid-template-columns: 280px 1fr; gap: 10px; flex: 1; min-height: 0; }
       .panel {
@@ -170,7 +199,11 @@
       th { color: var(--muted); position: sticky; top: 0; background: var(--panel-2); cursor: pointer; }
       td { color: #c9d3de; }
       tr.clickable:hover td { background: #16202b; }
-      td.s2 { color: var(--accent); } td.s4 { color: var(--warn); } td.s5 { color: var(--danger); }
+      /* One status palette, shared by the request tables and the log rows. */
+      .s2 { color: var(--accent); }
+      .s3 { color: #67e8f9; }
+      .s4 { color: var(--warn); }
+      .s5 { color: var(--danger); }
       .tablelist button {
         display: block; width: 100%; text-align: left; background: none; border: none;
         color: var(--text); font: inherit; padding: 5px 7px; border-radius: 7px; cursor: pointer;
@@ -193,6 +226,33 @@
       }
       .flash.show { opacity: 1; }
       .flash.bad { border-color: #7f1d1d; color: #fca5a5; }
+
+      /* Shutting down. A sheet rather than a confirm() because this closes six
+         windows and two servers, and the reader deserves the list. */
+      .sheet {
+        position: fixed; inset: 0; z-index: 100; display: none;
+        align-items: center; justify-content: center;
+        background: rgba(6, 9, 13, .78); backdrop-filter: blur(3px);
+      }
+      .sheet.show { display: flex; }
+      .sheet .box {
+        background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+        padding: 20px 22px; max-width: 520px; width: calc(100% - 40px);
+        box-shadow: 0 20px 60px rgba(0, 0, 0, .5);
+      }
+      .sheet h2 { margin: 0 0 8px; font-size: 16px; }
+      .sheet p { margin: 0 0 12px; font-size: 12px; color: var(--muted); line-height: 1.6; }
+      .sheet ul { margin: 0 0 14px; padding-left: 18px; font-size: 12px; color: var(--muted); }
+      .sheet li { margin: 2px 0; }
+      .sheet .safe { color: var(--accent); }
+      .sheet .buttons { display: flex; gap: 8px; justify-content: flex-end; }
+      .steps { list-style: none; padding: 0; margin: 0 0 14px; font-size: 12px; }
+      .steps li { display: flex; gap: 8px; align-items: center; padding: 3px 0; color: var(--muted); }
+      .steps li .mark { width: 14px; flex: none; text-align: center; }
+      .steps li.done { color: var(--text); }
+      .steps li.done .mark { color: var(--accent); }
+      #shutdown { flex: none; }
+      .svc .dot.stale { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
     </style>
   </head>
   <body>
@@ -207,6 +267,11 @@
       <div class="brand">Gamira<small>server console</small></div>
       <div class="services" id="services"></div>
       <div class="uptime"><span id="uptime"></span><br /><span id="armed" class="note"></span></div>
+      <!-- In the header, not buried in a tab: it is the way out of the whole
+           stack, and hunting for it while something is going wrong is no fun. -->
+      <button class="action danger" id="shutdown" title="Close every window and stop every service">
+        Shut down
+      </button>
     </header>
 
     <nav>
@@ -230,14 +295,19 @@
             id="search"
             placeholder="filter…  word   -exclude   /regex/     ( / to focus )"
           />
-          <button class="action" id="collapse">Collapse repeats</button>
+          <!-- Only visible while the view is pinned to one request. It used to be
+               a line of footer text, so the only way out was finding the row you
+               clicked — which the pin itself may have filtered away. -->
+          <span class="chip on" id="pinned" style="display: none"></span>
           <button class="action on" id="autoscroll">Follow</button>
           <button class="action" id="pause">Pause</button>
+          <button class="action" id="collapse">Collapse</button>
           <button class="action" id="clear">Clear</button>
           <button class="action" id="save">Save</button>
         </div>
-        <div class="bar" id="kinds"></div>
         <div class="bar">
+          <span id="kinds" style="display: contents"></span>
+          <span class="sep"></span>
           <span id="tags" style="display: contents"></span>
           <span class="sep"></span>
           <select id="window">
@@ -247,7 +317,7 @@
             <option value="900">Last 15 minutes</option>
           </select>
           <select id="preset"><option value="">Presets…</option></select>
-          <button class="action" id="save-preset">Save preset</button>
+          <button class="action" id="save-preset">Save filter</button>
         </div>
         <div id="log"></div>
         <div class="note" id="counts"></div>
@@ -435,6 +505,22 @@
               a watch reporting that a number left the range set on it — amber,
               dismissible. Gamira contacts nobody outside the app either way.
             </div>
+            <h3 style="margin-top: 14px">Keep the machine healthy</h3>
+            <div class="stack">
+              <button class="action" data-act="reap-orphans">
+                Stop stray Gamira processes
+              </button>
+              <button class="action" data-act="reclaim-space">
+                Delete caches and test leftovers
+              </button>
+              <div class="note">
+                Leftover workers from an earlier run are the reason this exists:
+                several of them polling the same database is invisible until the
+                machine is on its knees. Neither button touches your data,
+                <code>node_modules</code> or any source file.
+              </div>
+            </div>
+
             <h3 style="margin-top: 14px">This run</h3>
             <div class="stack">
               <button class="action" data-act="open-docs">Open API documentation</button>
@@ -458,11 +544,44 @@
       </section>
     </main>
 
+    <!-- Asking, then reporting. Two states of the same sheet, so pressing the
+         button never leaves the screen looking like nothing happened. -->
+    <div class="sheet" id="confirm-sheet">
+      <div class="box">
+        <h2>Shut down everything?</h2>
+        <p>This closes, in order:</p>
+        <ul id="confirm-list">
+          <li>every app, dashboard and watch window</li>
+          <li>the API and the background worker</li>
+          <li>both dev servers and the voice lab</li>
+          <li>this console window, and the terminal behind it</li>
+        </ul>
+        <p class="safe">
+          Nothing in the database is deleted. Start it again with
+          <code>python run.py</code> and everything is as you left it.
+        </p>
+        <div class="buttons">
+          <button class="action" id="confirm-cancel">Cancel</button>
+          <button class="action danger" id="confirm-go">Shut down</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="sheet" id="closing-sheet">
+      <div class="box">
+        <h2 id="closing-title">Shutting down…</h2>
+        <ul class="steps" id="closing-steps"></ul>
+        <p class="note" id="closing-note">
+          This window closes last, so you can read what happened.
+        </p>
+      </div>
+    </div>
+
     <div class="flash" id="flash"></div>
 
     <script>
       const $ = (id) => document.getElementById(id);
-      const TAGS = ["api", "parent", "dash", "watch", "voice", "run", "db"];
+      const TAGS = ["api", "worker", "parent", "dash", "watch", "voice", "run", "db"];
       const KINDS = [
         ["write", "Writes"],
         ["read", "Reads"],
@@ -484,9 +603,21 @@
       let currentTable = null;
       let voiceState = null;
       let reqFilter = "all";
+      let closing = false;
+      // Running tallies, so the chip counts do not mean walking every entry on
+      // every render.
+      const counts = {};
 
+      // Quotes included. Several of these values end up inside an attribute, and
+      // one of them — the request id — comes from a client-supplied
+      // `X-Request-Id` header, which makes it untrusted content in a page that
+      // can restart services and read the database.
       const escapeHtml = (text) =>
-        String(text).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+        String(text).replace(
+          /[&<>"']/g,
+          (c) =>
+            ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]
+        );
 
       function flash(message, bad) {
         const box = $("flash");
@@ -530,7 +661,7 @@
             kinds.add(key);
           }
           syncChips();
-          render();
+          rebuild();
         };
         kindBar.appendChild(chip);
       });
@@ -545,7 +676,7 @@
           if (hiddenTags.has(tag)) hiddenTags.delete(tag);
           else hiddenTags.add(tag);
           syncChips();
-          render();
+          rebuild();
         };
         tagBar.appendChild(chip);
       });
@@ -594,109 +725,259 @@
         };
       }
 
-      function visible() {
-        const matcher = buildMatcher($("search").value);
-        const seconds = Number($("window").value || 0);
-        const cutoff = seconds ? Date.now() / 1000 - seconds : 0;
-        return entries.filter((entry) => {
-          if (hiddenTags.has(entry.tag)) return false;
-          if (!kinds.has(entry.kind)) return false;
-          if (cutoff && entry.t < cutoff) return false;
-          if (pickedRequest && entry.request_id !== pickedRequest) return false;
-          return matcher.test(entry.text);
-        });
+      let matcher = buildMatcher("");
+
+      function shown(entry) {
+        if (hiddenTags.has(entry.tag)) return false;
+        if (!kinds.has(entry.kind)) return false;
+        if (windowCutoff && entry.t < windowCutoff) return false;
+        if (pickedRequest && entry.request_id !== pickedRequest) return false;
+        return matcher.test(entry.text + (entry.note ? " " + entry.note : ""));
       }
 
-      function collapsed(rows) {
-        if (!collapse) return rows.map((entry) => ({ entry, repeat: 1 }));
-        const out = [];
-        for (const entry of rows) {
-          const last = out[out.length - 1];
-          if (last && last.entry.text === entry.text && last.entry.tag === entry.tag) {
-            last.repeat += 1;
-            last.entry = entry;
-          } else {
-            out.push({ entry, repeat: 1 });
+      let windowCutoff = 0;
+      function refreshCutoff() {
+        const seconds = Number($("window").value || 0);
+        windowCutoff = seconds ? Date.now() / 1000 - seconds : 0;
+      }
+
+      function visible() {
+        matcher = buildMatcher($("search").value);
+        refreshCutoff();
+        return entries.filter(shown);
+      }
+
+      /** Wrap every hit in <mark> without ever touching an HTML entity.
+       *
+       * The old version escaped first and then ran the search over the result, so
+       * looking for `amp` or `lt` matched inside `&amp;` and printed the entity
+       * as literal text, while looking for `<` could never match at all. Split
+       * the raw text, escape the pieces, then join. */
+      function highlighted(text, term) {
+        if (!term) return escapeHtml(text);
+        const safe = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const parts = String(text).split(new RegExp(`(${safe})`, "gi"));
+        return parts
+          .map((part, index) =>
+            index % 2 ? `<mark>${escapeHtml(part)}</mark>` : escapeHtml(part)
+          )
+          .join("");
+      }
+
+      /** One row, built as elements. Nothing from a log line reaches an
+       *  attribute or innerHTML unescaped. */
+      function buildRow(entry) {
+        const row = document.createElement("div");
+        row.className = "row k-" + entry.kind + (entry.method ? "" : " prose");
+        if (entry.request_id) {
+          row.dataset.rid = entry.request_id;
+          row.title = "click: only this request";
+        }
+
+        const time = document.createElement("span");
+        time.className = "t";
+        time.textContent = entry.at;
+
+        const tag = document.createElement("span");
+        tag.className = "tag tag-" + entry.tag;
+        tag.textContent = entry.tag;
+        row.append(time, tag);
+
+        if (entry.method) {
+          const verb = document.createElement("span");
+          verb.className = "verb";
+          verb.textContent = entry.method;
+          row.append(verb);
+        }
+
+        const message = document.createElement("span");
+        message.className = "msg";
+        message.innerHTML = highlighted(
+          entry.method ? entry.path || entry.text : entry.text,
+          matcher.highlight
+        );
+        row.append(message);
+
+        if (entry.method) {
+          const status = document.createElement("span");
+          status.className = "st s" + String(entry.status || 0).charAt(0);
+          status.textContent = entry.status || "";
+          const duration = document.createElement("span");
+          duration.className = "ms";
+          duration.textContent =
+            entry.ms == null ? "" : Math.round(entry.ms) + "ms";
+          row.append(status, duration);
+        }
+
+        if (entry.note) {
+          const note = document.createElement("span");
+          note.className = "note";
+          note.textContent = "└─ " + entry.note;
+          row.append(note);
+        }
+        return row;
+      }
+
+      const MAX_ROWS = 2500;
+      let lastRow = null; // for collapse-repeats, which folds adjacent duplicates
+      let lastKey = null;
+      let lastRepeat = 1;
+      let rowCount = 0;
+
+      /** Add rows for entries that just arrived.
+       *
+       * Appending rather than rebuilding is the whole point. Replacing the
+       * innerHTML of 1500 rows every second cleared any text you had selected,
+       * fought your scrolling, and burnt CPU in the console whose job is to warn
+       * about CPU. */
+      function appendRows(list) {
+        const fragment = document.createDocumentFragment();
+        let added = 0;
+        for (const entry of list) {
+          if (!shown(entry)) continue;
+          const key = collapse ? entry.tag + " " + entry.text : null;
+          if (key !== null && key === lastKey && lastRow) {
+            lastRepeat += 1;
+            let badge = lastRow.querySelector(".rep");
+            if (!badge) {
+              badge = document.createElement("span");
+              badge.className = "rep";
+              lastRow.querySelector(".msg").append(badge);
+            }
+            badge.textContent = "×" + lastRepeat;
+            continue;
+          }
+          const row = buildRow(entry);
+          fragment.append(row);
+          lastRow = row;
+          lastKey = key;
+          lastRepeat = 1;
+          added += 1;
+        }
+        if (added) {
+          $("log").append(fragment);
+          rowCount += added;
+          while (rowCount > MAX_ROWS && $("log").firstElementChild) {
+            $("log").firstElementChild.remove();
+            rowCount -= 1;
           }
         }
-        return out;
+        if (follow) $("log").scrollTop = $("log").scrollHeight;
+        drawCounts();
       }
 
-      function render() {
-        const matcher = buildMatcher($("search").value);
-        const rows = collapsed(visible().slice(-1500));
-        const mark = matcher.highlight;
-        $("log").innerHTML = rows
-          .map(({ entry, repeat }) => {
-            let text = escapeHtml(entry.text);
-            if (mark) {
-              const safe = mark.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-              text = text.replace(new RegExp(safe, "gi"), (hit) => `<mark>${hit}</mark>`);
-            }
-            const rid = entry.request_id
-              ? ` data-rid="${entry.request_id}" title="click: only this request"`
-              : "";
-            return (
-              `<div class="row k-${entry.kind}"${rid}><span class="t">${entry.at}</span>` +
-              `<span class="tag tag-${entry.tag}">${entry.tag}</span>` +
-              `<span class="msg">${text}</span>` +
-              (repeat > 1 ? `<span class="rep">×${repeat}</span>` : "") +
-              `</div>`
-            );
-          })
-          .join("");
-        if (follow) $("log").scrollTop = $("log").scrollHeight;
+      /** Start the pane again from scratch. Only when a filter changed. */
+      let rebuilding = false;
+      function rebuild() {
+        matcher = buildMatcher($("search").value);
+        refreshCutoff();
+        // Emptying the pane puts the scroll position at the top, and the scroll
+        // handler below would read that as "the reader scrolled away" and turn
+        // following off for them.
+        rebuilding = true;
+        $("log").replaceChildren();
+        rowCount = 0;
+        lastRow = null;
+        lastKey = null;
+        lastRepeat = 1;
+        // Filter first, then take the newest that fit. Capping before filtering
+        // would mean a search for something older than the cap found nothing.
+        appendRows(entries.filter(shown).slice(-MAX_ROWS));
+        syncPinned();
+        setTimeout(() => (rebuilding = false), 0);
+      }
 
-        document.querySelectorAll("#log [data-rid]").forEach((row) => {
-          row.onclick = () => {
-            pickedRequest = pickedRequest === row.dataset.rid ? null : row.dataset.rid;
-            flash(pickedRequest ? `Only request ${pickedRequest.slice(0, 8)}` : "All requests");
-            render();
-          };
-        });
-
-        const counts = {};
-        entries.forEach((entry) => {
-          counts[entry.kind] = (counts[entry.kind] || 0) + 1;
-          counts["tag-" + entry.tag] = (counts["tag-" + entry.tag] || 0) + 1;
-        });
+      function drawCounts() {
         document.querySelectorAll("[data-n]").forEach((span) => {
           span.textContent = counts[span.dataset.n] || 0;
         });
         $("counts").textContent =
-          `${entries.length} lines · ${rows.length} shown` +
-          (pickedRequest ? ` · pinned to one request` : "") +
-          (paused ? ` · paused, ${pending} waiting` : "");
+          `${entries.length} lines · ${rowCount} shown` +
+          (paused ? ` · paused, ${pending} held` : "") +
+          (follow ? "" : " · following off, scroll to the bottom to resume");
       }
 
-      $("search").oninput = render;
-      $("window").onchange = render;
+      function syncPinned() {
+        const chip = $("pinned");
+        if (!pickedRequest) {
+          chip.style.display = "none";
+          return;
+        }
+        chip.style.display = "";
+        chip.textContent = `request ${pickedRequest.slice(0, 8)} ✕`;
+        chip.title = "Show every request again";
+      }
+
+      function pinRequest(id) {
+        pickedRequest = pickedRequest === id ? null : id;
+        rebuild();
+      }
+
+      // One listener for the whole pane, not one per row on every render.
+      $("log").onclick = (event) => {
+        const row = event.target.closest("[data-rid]");
+        if (row) pinRequest(row.dataset.rid);
+      };
+      $("pinned").onclick = () => {
+        pickedRequest = null;
+        rebuild();
+      };
+
+      // Following should lose to the person reading. Scroll away from the bottom
+      // and it switches itself off; scroll back and it comes on again.
+      $("log").onscroll = () => {
+        if (rebuilding) return;
+        const pane = $("log");
+        const atBottom = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 24;
+        if (atBottom !== follow) {
+          follow = atBottom;
+          $("autoscroll").classList.toggle("on", follow);
+          drawCounts();
+        }
+      };
+
+      $("search").oninput = rebuild;
+      $("window").onchange = rebuild;
       $("collapse").onclick = () => {
         collapse = !collapse;
         $("collapse").classList.toggle("on", collapse);
-        render();
+        rebuild();
       };
       $("autoscroll").onclick = () => {
         follow = !follow;
         $("autoscroll").classList.toggle("on", follow);
-        if (follow) render();
+        if (follow) $("log").scrollTop = $("log").scrollHeight;
+        drawCounts();
       };
       $("pause").onclick = () => {
         paused = !paused;
         $("pause").textContent = paused ? `Resume` : "Pause";
         $("pause").classList.toggle("on", paused);
-        if (!paused) pollLogs();
-        render();
+        // Held lines were kept while paused, so resuming shows them rather than
+        // starting from whatever happens next.
+        if (!paused) {
+          pending = 0;
+          rebuild();
+        } else {
+          drawCounts();
+        }
       };
       $("clear").onclick = async () => {
         await act("clear-logs");
         entries = [];
         lastSeq = 0;
+        pending = 0;
         pickedRequest = null;
-        render();
+        for (const key of Object.keys(counts)) delete counts[key];
+        rebuild();
       };
       $("save").onclick = () => {
-        const text = visible().map((e) => `${e.at} [${e.tag}] ${e.text}`).join("\n");
+        const text = visible()
+          .map(
+            (e) =>
+              `${e.at} [${e.tag}] ${e.text}` + (e.note ? `\n        └─ ${e.note}` : "")
+          )
+          .join("\n");
         const url = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
         const link = document.createElement("a");
         link.href = url;
@@ -712,7 +993,7 @@
         }
         if (event.key === "Escape" && document.activeElement === $("search")) {
           $("search").value = "";
-          render();
+          rebuild();
         }
       });
 
@@ -755,27 +1036,38 @@
         hiddenTags = new Set(preset.hidden || []);
         $("window").value = preset.window || "0";
         syncChips();
-        render();
+        rebuild();
       };
       drawPresets();
 
       async function pollLogs() {
+        if (closing) return;
         try {
           const data = await (await fetch("/api/logs?after=" + lastSeq)).json();
           if (data.seq < lastSeq) {
+            // The runner restarted and its sequence went back to the start.
             entries = [];
             lastSeq = 0;
+            for (const key of Object.keys(counts)) delete counts[key];
+            rebuild();
           }
           if (data.entries.length) {
             lastSeq = data.entries[data.entries.length - 1].seq;
+            for (const entry of data.entries) {
+              counts[entry.kind] = (counts[entry.kind] || 0) + 1;
+              counts["tag-" + entry.tag] = (counts["tag-" + entry.tag] || 0) + 1;
+            }
+            entries = entries.concat(data.entries).slice(-6000);
+            // Kept either way. Pausing used to advance the cursor and drop the
+            // lines, so "N waiting" was counting things already lost and resuming
+            // could never get them back — which is the opposite of what pausing
+            // to read something is for.
             if (paused) {
               pending += data.entries.length;
-              $("counts").textContent = `paused · ${pending} waiting`;
+              drawCounts();
               return;
             }
-            pending = 0;
-            entries = entries.concat(data.entries).slice(-6000);
-            render();
+            appendRows(data.entries);
           }
         } catch {
           /* the runner is gone or restarting; the next poll recovers */
@@ -815,9 +1107,10 @@
           rows
             .map(
               (row) =>
-                `<tr class="clickable" data-rid="${row.request_id}"><td>${row.at}</td>` +
-                `<td>${row.method}</td><td>${escapeHtml(row.short)}</td>` +
-                `<td class="s${String(row.status)[0]}">${row.status}</td>` +
+                `<tr class="clickable" data-rid="${escapeHtml(row.request_id)}">` +
+                `<td>${escapeHtml(row.at)}</td>` +
+                `<td>${escapeHtml(row.method)}</td><td>${escapeHtml(row.short)}</td>` +
+                `<td class="s${String(row.status)[0]}">${escapeHtml(row.status)}</td>` +
                 `<td>${row.ms.toFixed(1)}</td></tr>`
             )
             .join("") +
@@ -827,7 +1120,7 @@
           row.onclick = () => {
             pickedRequest = row.dataset.rid || null;
             document.querySelector('nav [data-tab="logs"]').click();
-            render();
+            rebuild();
             flash(`Showing only request ${(pickedRequest || "").slice(0, 8)}`);
           };
         });
@@ -838,7 +1131,7 @@
           endpoints
             .map(
               (row) =>
-                `<tr><td>${row.method}</td><td>${escapeHtml(row.template)}</td>` +
+                `<tr><td>${escapeHtml(row.method)}</td><td>${escapeHtml(row.template)}</td>` +
                 `<td>${row.count}</td><td class="${row.errors ? "s5" : ""}">${row.errors}</td>` +
                 `<td>${row.p50}</td><td>${row.p95}</td><td>${row.max}</td></tr>`
             )
@@ -1054,17 +1347,97 @@
           const name = button.dataset.act;
           if (name === "reset-db" && !confirm("Rebuild the database? Local changes are lost."))
             return;
-          if (name === "stop-all" && !confirm("Stop the API, both apps and the watch?")) return;
+          // Both routes to a shutdown go through the same sheet, so neither can
+          // end with a toast nobody sees because the window has already closed.
+          if (name === "stop-all" || name === "shutdown") {
+            askToShutDown();
+            return;
+          }
           act(name);
         };
       });
+
+      // -- shutting down ------------------------------------------------------ //
+
+      const CLOSING_STEPS = [
+        "Closing the app, dashboard and watch windows",
+        "Stopping the API and the background worker",
+        "Stopping the dev servers and the voice lab",
+        "Sweeping up anything they left behind",
+        "Closing this window and the terminal",
+      ];
+
+      function askToShutDown() {
+        $("confirm-sheet").classList.add("show");
+        $("confirm-go").focus();
+      }
+      $("shutdown").onclick = askToShutDown;
+      $("confirm-cancel").onclick = () => $("confirm-sheet").classList.remove("show");
+      $("confirm-sheet").onclick = (event) => {
+        if (event.target === $("confirm-sheet")) $("confirm-cancel").onclick();
+      };
+
+      $("confirm-go").onclick = async () => {
+        $("confirm-sheet").classList.remove("show");
+        $("closing-sheet").classList.add("show");
+        // Stop every poll first. The runner is about to go away, and a page still
+        // asking it for logs would spend its last second collecting failures.
+        closing = true;
+        TIMERS.forEach((timer) => clearInterval(timer));
+        TIMERS.length = 0;
+
+        $("closing-steps").innerHTML = CLOSING_STEPS.map(
+          (step) => `<li><span class="mark">·</span><span>${escapeHtml(step)}</span></li>`
+        ).join("");
+
+        let answer;
+        try {
+          const response = await fetch("/api/action", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: "shutdown" }),
+          });
+          answer = await response.json();
+        } catch (error) {
+          answer = { ok: false, message: String(error) };
+        }
+        if (!answer.ok) {
+          $("closing-title").textContent = "Could not shut down";
+          $("closing-note").textContent =
+            answer.message + " — Ctrl+C in the terminal still works.";
+          return;
+        }
+
+        // The runner waits a second before it starts, then works down the list.
+        // These are the steps it takes, paced to match; the honest part is that
+        // this window is killed at the end, which is the real confirmation.
+        const items = [...$("closing-steps").children];
+        items.forEach((item, index) => {
+          setTimeout(() => {
+            item.classList.add("done");
+            item.querySelector(".mark").textContent = "✓";
+          }, 900 + index * 700);
+        });
+        setTimeout(() => {
+          $("closing-title").textContent = "Everything stopped";
+          $("closing-note").textContent =
+            "If this window is still here, the runner had already exited — " +
+            "you can close it.";
+        }, 900 + items.length * 700);
+      };
 
       function renderState(state) {
         $("services").innerHTML = state.services
           .map(
             (service) =>
-              `<span class="svc"><span class="dot ${service.running ? "up" : ""}"></span>` +
-              `${service.label}${service.port ? " :" + service.port : ""}</span>`
+              // Three states, not two: a supervisor can be alive while the thing
+              // it supervises is not, and a green dot beside an API serving
+              // nothing is worse than no dot at all.
+              `<span class="svc"><span class="dot ${
+                !service.running ? "" : service.answering ? "up" : "stale"
+              }"></span>` +
+              `${escapeHtml(service.label)}${service.port ? " :" + service.port : ""}` +
+              `${service.running && !service.answering ? " · not answering" : ""}</span>`
           )
           .join("");
         const minutes = Math.floor(state.uptime / 60);
@@ -1073,10 +1446,16 @@
         $("svc-cards").innerHTML = state.services
           .map(
             (service) =>
-              `<div class="card rowline"><div><div class="name">${service.label}</div>` +
-              `<div class="meta">${service.running ? "running · pid " + service.pid : "stopped"}` +
+              `<div class="card rowline"><div><div class="name">${escapeHtml(service.label)}</div>` +
+              `<div class="meta">${
+                service.running
+                  ? "running · pid " +
+                    service.pid +
+                    (service.answering ? "" : " · not answering on its port")
+                  : "stopped"
+              }` +
               `${service.port ? " · port " + service.port : ""}</div></div>` +
-              `<button class="action" data-restart="${service.tag}">Restart</button></div>`
+              `<button class="action" data-restart="${escapeHtml(service.tag)}">Restart</button></div>`
           )
           .join("");
         document.querySelectorAll("[data-restart]").forEach((button) => {
@@ -1113,13 +1492,14 @@
           .filter((person) => person.role === "parent" && person.senior_id)
           .map(
             (person) =>
-              `<div class="card"><div class="rowline"><div><div class="name">${person.person}</div>` +
-              `<div class="meta">${person.label}</div></div></div>` +
+              `<div class="card"><div class="rowline"><div>` +
+              `<div class="name">${escapeHtml(person.person)}</div>` +
+              `<div class="meta">${escapeHtml(person.label)}</div></div></div>` +
               `<div class="bar" style="margin-top: 8px">` +
-              `<button class="action danger" data-sos="${person.subject}" ` +
-              `data-senior="${person.senior_id}">Raise SOS</button>` +
-              `<button class="action" data-flag="${person.subject}" ` +
-              `data-senior="${person.senior_id}">Flag a reading</button></div></div>`
+              `<button class="action danger" data-sos="${escapeHtml(person.subject)}" ` +
+              `data-senior="${escapeHtml(person.senior_id)}">Raise SOS</button>` +
+              `<button class="action" data-flag="${escapeHtml(person.subject)}" ` +
+              `data-senior="${escapeHtml(person.senior_id)}">Flag a reading</button></div></div>`
           );
         $("sos-cards").innerHTML =
           cards.join("") || '<div class="note">No Parent App in this run.</div>';
@@ -1134,10 +1514,27 @@
       }
 
       async function pollState() {
+        if (closing) return;
+        let state;
         try {
-          renderState(await (await fetch("/api/state")).json());
+          state = await (await fetch("/api/state")).json();
         } catch {
           $("uptime").textContent = "runner not reachable";
+          return;
+        }
+        // A state the runner could not assemble is not the same as a runner that
+        // is gone, and reporting both as "not reachable" sent you looking in
+        // entirely the wrong place.
+        if (!state || !state.services) {
+          $("uptime").textContent = "state unavailable";
+          $("armed").textContent = state && state.error ? state.error : "";
+          return;
+        }
+        try {
+          renderState(state);
+        } catch (error) {
+          $("uptime").textContent = "state unreadable";
+          $("armed").textContent = String(error);
         }
       }
 
@@ -1218,15 +1615,21 @@
           "</tbody>";
       }
 
+      // Kept, so a shutdown can stop every poll before the runner goes away.
+      const TIMERS = [];
+
       pollLogs();
       pollState();
       loadVoice();
-      setInterval(pollLogs, 1000);
-      setInterval(pollState, 3000);
-      setInterval(() => {
-        if ($("tab-requests").classList.contains("on")) loadRequests();
-        if ($("tab-cost").classList.contains("on")) loadCost();
-      }, 3000);
+      TIMERS.push(setInterval(pollLogs, 1000));
+      TIMERS.push(setInterval(pollState, 3000));
+      TIMERS.push(
+        setInterval(() => {
+          if (closing) return;
+          if ($("tab-requests").classList.contains("on")) loadRequests();
+          if ($("tab-cost").classList.contains("on")) loadCost();
+        }, 3000)
+      );
 
       // -- health ----------------------------------------------------------- //
       //
@@ -1253,6 +1656,7 @@
       }
 
       async function loadHealth() {
+        if (closing) return;
         let health;
         try {
           health = await fetch("/api/health").then((r) => r.json());
@@ -1297,19 +1701,47 @@
             : String(warnings.length)
           : "";
 
-        const diskPercentFree = health.disk_total_gb
-          ? (health.disk_free_gb / health.disk_total_gb) * 100
-          : 100;
+        // A reading that could not be taken is null, and `null <= 10` is true in
+        // JavaScript — so a missing disk figure used to paint a full-width red bar
+        // reading "null GB free of null GB". A monitor that invents an emergency
+        // when it cannot read is worse than one that admits it does not know.
+        const known = (value) => typeof value === "number" && isFinite(value);
+        const pair = (used, total, unit = "GB") =>
+          known(used) && known(total) ? `${used} / ${total} ${unit}` : "unavailable";
+
+        const diskPercentFree =
+          known(health.disk_free_gb) && known(health.disk_total_gb) && health.disk_total_gb
+            ? (health.disk_free_gb / health.disk_total_gb) * 100
+            : null;
         const ownShare =
-          health.cpu && health.own_cpu != null && health.cpu > 0
+          known(health.cpu) && health.own_cpu != null && health.cpu > 0
             ? Math.round((health.own_cpu / health.cpu) * 100)
             : 0;
+        const commitPercent =
+          known(health.commit_used_gb) && known(health.commit_total_gb) && health.commit_total_gb
+            ? (health.commit_used_gb / health.commit_total_gb) * 100
+            : null;
+
+        function diskBand() {
+          if (diskPercentFree === null && !known(health.disk_free_gb)) return "ok";
+          if (
+            (known(health.disk_free_gb) && health.disk_free_gb <= t.disk_critical_gb) ||
+            (diskPercentFree !== null && diskPercentFree <= t.disk_critical_percent)
+          )
+            return "critical";
+          if (
+            (known(health.disk_free_gb) && health.disk_free_gb <= t.disk_warn_gb) ||
+            (diskPercentFree !== null && diskPercentFree <= t.disk_warn_percent)
+          )
+            return "warn";
+          return "ok";
+        }
 
         $("health-meters").innerHTML =
           meter(
             "CPU" + (health.throttled ? " — limited by firmware" : ""),
             health.cpu ?? 0,
-            `${(health.cpu ?? 0).toFixed(0)}%`,
+            known(health.cpu) ? `${health.cpu.toFixed(0)}%` : "unavailable",
             health.throttled
               ? "critical"
               : bandFor(health.cpu ?? 0, t.cpu_warn, t.cpu_critical),
@@ -1322,38 +1754,30 @@
           meter(
             "Memory",
             health.memory_percent ?? 0,
-            `${(health.memory_percent ?? 0).toFixed(0)}%  ·  ${health.memory_used_gb} / ${health.memory_total_gb} GB`,
+            (known(health.memory_percent) ? `${health.memory_percent.toFixed(0)}%  ·  ` : "") +
+              pair(health.memory_used_gb, health.memory_total_gb),
             bandFor(health.memory_percent ?? 0, t.memory_warn, t.memory_critical),
             health.own_memory_mb != null
-              ? `Gamira: ${(health.own_memory_mb / 1024).toFixed(1)} GB`
+              ? `Gamira: ${(health.own_memory_mb / 1024).toFixed(1)} GB, ` +
+                "counting the processes our processes started"
               : ""
           ) +
           meter(
             "Commit charge",
-            health.commit_total_gb
-              ? (health.commit_used_gb / health.commit_total_gb) * 100
-              : 0,
-            `${health.commit_used_gb} / ${health.commit_total_gb} GB`,
-            bandFor(
-              health.commit_total_gb
-                ? (health.commit_used_gb / health.commit_total_gb) * 100
-                : 0,
-              80,
-              92
-            ),
+            commitPercent ?? 0,
+            pair(health.commit_used_gb, health.commit_total_gb),
+            commitPercent === null ? "ok" : bandFor(commitPercent, 80, 92),
             "Physical memory plus page file. Running this out is what makes Windows stop responding."
           ) +
           // Inverted on purpose: the bar shows how full the drive is, so a long
           // red bar means trouble in the same direction as the others.
           meter(
             `Disk ${health.disk_path || ""}`,
-            100 - diskPercentFree,
-            `${health.disk_free_gb} GB free of ${health.disk_total_gb} GB`,
-            diskPercentFree <= t.disk_critical_gb / 10 || health.disk_free_gb <= t.disk_critical_gb
-              ? "critical"
-              : health.disk_free_gb <= t.disk_warn_gb || diskPercentFree <= 12
-              ? "warn"
-              : "ok",
+            diskPercentFree === null ? 0 : 100 - diskPercentFree,
+            known(health.disk_free_gb) && known(health.disk_total_gb)
+              ? `${health.disk_free_gb} GB free of ${health.disk_total_gb} GB`
+              : "unavailable",
+            diskBand(),
             "The system drive, where the page file and every temp file live."
           );
 
@@ -1369,15 +1793,15 @@
 
         const own = health.own_processes || [];
         $("health-own").innerHTML = own.length
-          ? "<tr><th>Process</th><th>PID</th><th>CPU</th><th>Memory</th></tr>" +
+          ? "<tr><th>Service</th><th>PID</th><th>Procs</th><th>CPU</th><th>Memory</th></tr>" +
             own
               .slice()
               .sort((a, b) => b.memory_mb - a.memory_mb)
               .map(
                 (row) =>
-                  `<tr><td>${escapeHtml(row.tag || "?")}</td><td>${row.pid}</td><td>${row.cpu.toFixed(
-                    0
-                  )}%</td><td>${row.memory_mb} MB</td></tr>`
+                  `<tr><td>${escapeHtml(row.tag || "?")}</td><td>${row.pid}</td>` +
+                  `<td>${row.processes || 1}</td>` +
+                  `<td>${row.cpu.toFixed(0)}%</td><td>${row.memory_mb} MB</td></tr>`
               )
               .join("")
           : "<tr><td class='note'>No processes are being tracked.</td></tr>";
@@ -1387,16 +1811,28 @@
       }
 
       // Poll while the tab is open, and once a minute regardless so the badge
-      // warns even when somebody is looking at the log.
+      // warns even when somebody is looking at the log. The minute is tracked
+      // explicitly: the old `Date.now() % 60000 < 5000` test had a window exactly
+      // as wide as the interval, so drift made it fire twice in some minutes and
+      // never in others — and a backgrounded window, whose timers Chrome throttles
+      // to about one a minute, could stop updating the badge altogether, which is
+      // the one case the branch exists for.
+      let lastHealthAt = 0;
       function startHealthPolling() {
         if (healthTimer) return;
         healthTimer = setInterval(() => {
+          if (closing) return;
           const open = $("tab-health").classList.contains("on");
-          if (open || Date.now() % 60000 < 5000) loadHealth();
+          if (open || Date.now() - lastHealthAt >= 60000) {
+            lastHealthAt = Date.now();
+            loadHealth();
+          }
         }, 5000);
+        TIMERS.push(healthTimer);
       }
       startHealthPolling();
       loadHealth();
+      rebuild();
     </script>
   </body>
 </html>

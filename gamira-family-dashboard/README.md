@@ -10,12 +10,12 @@ It talks to one backend: `gamira-backend`. There is no other data source.
 
 ```powershell
 # 1. Backend, in another terminal
-cd Z:\Gamira\gamira-backend
+cd Z:\Gamira\Gamira-App\gamira-backend
 .\.venv\Scripts\Activate.ps1
 uvicorn app.main:app --reload --port 8000
 
 # 2. This app
-cd Z:\Gamira\gamira-family-dashboard
+cd Z:\Gamira\Gamira-App\gamira-family-dashboard
 npm install
 npm run dev          # http://localhost:5174
 ```

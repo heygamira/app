@@ -8,7 +8,7 @@ reads and writes through the Gamira backend.
 Start the API first:
 
 ```powershell
-cd Z:\Gamira\gamira-backend
+cd Z:\Gamira\Gamira-App\gamira-backend
 .\.venv\Scripts\Activate.ps1
 alembic upgrade head
 python -m app.db.seed
@@ -18,7 +18,7 @@ uvicorn app.main:app --reload --port 8000
 Then:
 
 ```powershell
-cd Z:\Gamira\gamira-parent-app-original
+cd Z:\Gamira\Gamira-App\gamira-parent-app-original
 npm install
 npm run dev
 ```

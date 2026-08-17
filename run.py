@@ -94,7 +94,7 @@ WATCH_INTERVAL_SECONDS = 6.0
 
 VOICE = True  # start the Gemini Live token server alongside the Parent App
 OPEN_WINDOWS = True
-API_RELOAD = True  # uvicorn --reload: edit the backend and it restarts
+API_RELOAD = True  # uvicorn --reload on app/ only: edit the backend and it restarts
 
 # --------------------------------------------------------------------------- #
 
@@ -127,6 +127,7 @@ DIM = "\033[2m"
 COLORS = {
     "run": "\033[32m",
     "api": "\033[34m",
+    "worker": "\033[92m",
     "parent": "\033[36m",
     "dash": "\033[35m",
     "watch": "\033[33m",
@@ -136,8 +137,18 @@ COLORS = {
 }
 
 processes: list[tuple[str, subprocess.Popen]] = []
-browsers: list[subprocess.Popen] = []
+# Named, so the shutdown can close the console window *last* — it is the window
+# showing the shutdown, and killing it first meant nobody ever saw one.
+browsers: list[tuple[str, subprocess.Popen]] = []
 shutting_down = threading.Event()
+# Set by the console's Shut down button. The shutdown itself then runs on the
+# main thread: it used to run on a daemon thread that interpreter exit killed
+# part-way through, which is how children survived a "Stop everything".
+shutdown_requested = threading.Event()
+# Restarting a service mutates `processes`, which stop_all() iterates.
+process_lock = threading.Lock()
+# Told to run.cmd, which skips its `pause` for this one so the window closes.
+CONSOLE_EXIT = 7
 KILL_JOB = None  # set in main(); see open_kill_job()
 
 # Every child that can be restarted, by tag: the arguments spawn() was called
@@ -148,17 +159,43 @@ SPECS: dict[str, dict] = {}
 STOPPED_ON_PURPOSE: set[int] = set()
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
+# The clock is optional: a console record carries its time as a field now, so the
+# text is just "GET /path 200 4ms". Requiring the clock here silently reclassified
+# every request as "info" and emptied the Writes and Reads chips.
 REQUEST_LINE = re.compile(
-    r"^\d\d:\d\d:\d\d +(?P<method>GET|POST|PATCH|PUT|DELETE) +(?P<path>\S+) +(?P<status>\d{3})"
+    r"^(?:\d\d:\d\d:\d\d +)?(?P<method>GET|POST|PATCH|PUT|DELETE) +"
+    r"(?P<path>\S+) +(?P<status>\d{3})"
 )
+UNSAFE_IN_ID = re.compile(r"[^A-Za-z0-9._:-]")
 
 
-def classify(text: str) -> str:
-    """Label a line so the console can filter by what it means, not by words."""
+def safe_request_id(value: str) -> str:
+    """A request id fit to put in a web page.
+
+    The API accepts an inbound ``X-Request-Id`` so a caller can correlate its own
+    logs, capped at 64 characters but otherwise untouched — correct there, since
+    it is never used for authorization. It reaches this console, though, and the
+    console renders it. Anything a caller sends is therefore untrusted content in
+    a page that can restart services and read the database, so it is reduced to
+    the characters an id can legitimately contain before it is stored.
+    """
+    return UNSAFE_IN_ID.sub("", value or "")[:64]
+
+
+def classify(text: str, meta: dict | None = None) -> str:
+    """Label a line so the console can filter by what it means, not by words.
+
+    Prefers the fields when a renderer supplied them — a status of 500 is a more
+    reliable signal than the word "error" appearing somewhere in a line.
+    """
     if "SOS" in text:
         return "sos"
     if "UNUSUAL" in text:
         return "unusual"
+    if meta and meta.get("status") and meta.get("method"):
+        if int(meta["status"]) >= 400:
+            return "error"
+        return "read" if meta["method"] == "GET" else "write"
     match = REQUEST_LINE.match(text)
     if match:
         if int(match.group("status")) >= 400:
@@ -186,6 +223,9 @@ class LogBus:
         plain = ANSI.sub("", text).rstrip()
         if not plain:
             return
+        # The note travels with the request now, and it is what says "SOS".
+        note = str(meta["note"]) if meta and meta.get("note") else ""
+        classified = f"{plain} {note}" if note else plain
         with self.lock:
             self.seq += 1
             entry = {
@@ -194,7 +234,7 @@ class LogBus:
                 "t": time.time(),
                 "tag": tag,
                 "text": plain,
-                "kind": classify(plain),
+                "kind": classify(classified, meta),
             }
             # Requests carry their id, so the console can pivot from a line to
             # everything else that happened inside the same request.
@@ -203,8 +243,29 @@ class LogBus:
             self.entries.append(entry)
 
     def after(self, seq: int, limit: int = 900) -> list[dict]:
+        """Everything newer than `seq`, newest last, capped.
+
+        The cap matters and so does saying when it bit. The console cursors off
+        the last entry it received, so silently returning only the newest 900 of
+        a burst would move its cursor past the rest and lose them with no trace —
+        the worst thing a log viewer can do during the incident being read. A
+        traceback storm or a Vite dependency re-scan reaches that in one second.
+        """
         with self.lock:
-            return [entry for entry in self.entries if entry["seq"] > seq][-limit:]
+            fresh = [entry for entry in self.entries if entry["seq"] > seq]
+        if len(fresh) <= limit:
+            return fresh
+        dropped = len(fresh) - limit
+        kept = fresh[-limit:]
+        gap = {
+            "seq": kept[0]["seq"] - 1,
+            "at": kept[0]["at"],
+            "t": kept[0]["t"],
+            "tag": "run",
+            "text": f"… {dropped} earlier lines are in the terminal but not here",
+            "kind": "info",
+        }
+        return [gap, *kept]
 
     def clear(self) -> None:
         with self.lock:
@@ -401,10 +462,20 @@ def pump(process: subprocess.Popen, tag: str, render) -> None:
             text = raw.rstrip()
             if not text:
                 continue
-            lines, meta = render(text) if render else ([text], None)
-            for line in lines or []:
-                print(f"{color}[{tag}]{RESET} {line}", flush=True)
-                LOGS.add(tag, line, meta)
+            # Per line, not per stream. One unparseable line used to break out of
+            # this loop, block on wait() until the child eventually died, and then
+            # report a crash that never happened — so a single odd line silenced a
+            # service's logs for the rest of the run.
+            try:
+                lines, records = render(text) if render else ([text], [(text, None)])
+                for line in lines or []:
+                    print(f"{color}[{tag}]{RESET} {line}", flush=True)
+                for body, meta in records or []:
+                    LOGS.add(tag, body, meta)
+            except Exception as error:
+                print(f"{color}[{tag}]{RESET} {text}", flush=True)
+                LOGS.add(tag, text, None)
+                LOGS.add("run", f"could not format a {tag} line: {error}", None)
     except Exception as error:  # never let a print failure kill the pump
         fail(f"{tag} output stopped: {error}")
     process.wait()  # otherwise returncode is still None right after EOF
@@ -449,20 +520,34 @@ def running(tag: str) -> bool:
 
 
 def restart(tag: str) -> str:
-    """Stop one service and start it again from the arguments it was given."""
-    spec = SPECS.get(tag)
-    if spec is None:
-        return f"{tag} is not part of this run"
-    process = spec.get("process")
-    if process is not None and process.poll() is None:
-        kill(process)
-        try:
-            process.wait(timeout=8)
-        except subprocess.TimeoutExpired:
-            process.kill()
-    processes[:] = [(name, proc) for name, proc in processes if proc is not process]
-    say(f"restarting {tag}…")
-    spawn(tag, spec["command"], spec["cwd"], spec["env"], spec["render"])
+    """Stop one service and start it again from the arguments it was given.
+
+    Serialised, because the console gives every request its own thread. Two
+    Restart clicks used to read the same old process, both filter it out of
+    `processes`, and spawn two replacements — the second could not bind the port
+    and was reported as "exited with code 1" for no visible reason.
+    """
+    if shutting_down.is_set():
+        return "everything is shutting down"
+    with process_lock:
+        spec = SPECS.get(tag)
+        if spec is None:
+            return f"{tag} is not part of this run"
+        process = spec.get("process")
+        if process is not None and process.poll() is None:
+            kill(process)
+            try:
+                process.wait(timeout=8)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        # Rebuild in place rather than slice-assigning: stop_all() walks this
+        # same list, and reindexing it underneath that walk can skip an entry,
+        # which strands exactly the process this file exists to never strand.
+        keep = [(name, proc) for name, proc in processes if proc is not process]
+        processes.clear()
+        processes.extend(keep)
+        say(f"restarting {tag}…")
+        spawn(tag, spec["command"], spec["cwd"], spec["env"], spec["render"])
     return f"{tag} restarted"
 
 
@@ -473,9 +558,28 @@ def kill(process: subprocess.Popen) -> None:
     if IS_WINDOWS:
         # npm spawns node as a grandchild, and uvicorn --reload spawns a worker;
         # terminate() would only kill the shim and leave the port held.
-        subprocess.run(
-            ["taskkill", "/F", "/T", "/PID", str(process.pid)], capture_output=True
-        )
+        try:
+            # A timeout, because this is the one on the shutdown path: without it
+            # a wedged taskkill hangs the whole shutdown, and Ctrl+C with it.
+            finished = subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            say(f"could not stop pid {process.pid}: {error}", "run", "err")
+            return
+        # "not found" just means it died on its own between the poll and here.
+        complaint = (finished.stderr or "").lower()
+        if finished.returncode != 0 and "not found" not in complaint:
+            say(
+                f"taskkill on pid {process.pid} said: "
+                f"{(finished.stderr or '').strip() or finished.returncode}",
+                "run",
+                "err",
+            )
     else:
         process.terminate()
 
@@ -501,7 +605,11 @@ def find_orphans() -> list[dict]:
         "$_.CommandLine -like '*app.worker*' -or "
         "$_.CommandLine -like '*uvicorn app.main*' -or "
         "$_.CommandLine -like '*gemini_token_server*' -or "
-        "$_.CommandLine -like '*sim_server.py*') } | "
+        "$_.CommandLine -like '*sim_server.py*' -or "
+        # A stranded Vite keeps 5173 or 5174 and the next run fails on
+        # --strictPort with nothing to explain why.
+        "$_.CommandLine -like '*gamira-parent-app-original*vite*' -or "
+        "$_.CommandLine -like '*gamira-family-dashboard*vite*') } | "
         "ForEach-Object { $_.ProcessId.ToString() + '|' + $_.CommandLine }"
     )
     try:
@@ -530,6 +638,10 @@ def find_orphans() -> list[dict]:
             kind = "api"
         elif "gemini_token_server" in command:
             kind = "voice lab"
+        elif "gamira-parent-app-original" in command:
+            kind = "parent app server"
+        elif "gamira-family-dashboard" in command:
+            kind = "dashboard server"
         else:
             kind = "watch"
         found.append({"pid": pid, "kind": kind, "command": command.strip()[:120]})
@@ -575,7 +687,11 @@ def check_machine_headroom() -> bool:
     if SystemMonitor is None:
         return True
     try:
-        snapshot = SystemMonitor(interval_seconds=1.0).snapshot()
+        # Without probe_throttle this takes the cached (empty) throttle answer
+        # instead of shelling out to PowerShell for up to fifteen seconds. Startup
+        # already pays for one PowerShell call in find_orphans; two of them before
+        # the first line of output is a worse start than no throttle reading.
+        snapshot = SystemMonitor(interval_seconds=1.0).snapshot(probe_throttle=False)
     except Exception:
         return True
     if not snapshot.get("available"):
@@ -616,24 +732,39 @@ def check_machine_headroom() -> bool:
 
 
 def stop_all() -> None:
+    """Close every window and stop every service, in an order that can be watched.
+
+    The console window goes last on purpose. It is the window showing the
+    shutdown, and closing it first — which is what used to happen — meant the
+    only readable account of what stopped disappeared before the first service
+    had been asked to stop.
+    """
     if shutting_down.is_set():
         return
     shutting_down.set()
-    for process in browsers:
-        kill(process)
-    for tag, process in processes:
+
+    console_windows = [pair for pair in browsers if pair[0] == "console"]
+    for name, process in browsers:
+        if name != "console":
+            kill(process)
+
+    with process_lock:
+        current = list(processes)
+    for tag, process in current:
         if process.poll() is None:
             say(f"stopping {tag}…")
         kill(process)
-    for _, process in processes:
+    for _, process in current:
         try:
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             process.kill()
+
     # A supervised process can still leave a grandchild behind — npm spawns
     # node, and a killed parent does not always take it with it. Sweeping here
     # is what stops the next run inheriting a busy machine.
     remaining = find_orphans()
+    swept = 0
     for orphan in remaining:
         try:
             subprocess.run(
@@ -642,8 +773,15 @@ def stop_all() -> None:
                 timeout=10,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
+            swept += 1
         except (OSError, subprocess.SubprocessError):
-            pass
+            say(f"could not stop leftover pid {orphan['pid']}", "run", "err")
+    if swept:
+        say(f"swept {swept} leftover process(es) a killed parent had left behind")
+    say(f"everything stopped. {len(remaining) - swept} stray process(es) left.")
+
+    for _, process in console_windows:
+        kill(process)
 
 
 # --------------------------------------------------------------------------- #
@@ -689,13 +827,24 @@ def endpoint_template(path: str) -> str:
     return UUID_IN_PATH.sub(":id", path)
 
 
-def render_api(text: str) -> tuple[list[str], dict | None]:
-    """Turn one API log line into what the terminal shows and what we keep."""
+Record = tuple[str, dict | None]
+
+
+def render_api(text: str) -> tuple[list[str], list[Record]]:
+    """Turn one API log line into terminal output and console records.
+
+    Two separate things, deliberately. The terminal wants ANSI colour, a padded
+    path so successive lines align, and the plain-language note on a line of its
+    own. The console wants the *fields* — method, path, status, duration — so it
+    can lay out real columns and colour a 500 differently from a 200. Handing it
+    the terminal string instead was why every row in it showed its clock twice
+    and nothing was coloured by status.
+    """
     match = ACCESS_LINE.match(text)
     if not match:
         # Tracebacks and anything else that is not one of our log lines.
         colour = COLORS["err"] if ("ERROR" in text or "Traceback" in text) else DIM
-        return [f"{colour}{text}{RESET}"], None
+        return [f"{colour}{text}{RESET}"], [(text, None)]
 
     logger, rest, clock = (
         match.group("logger"),
@@ -705,14 +854,14 @@ def render_api(text: str) -> tuple[list[str], dict | None]:
     # uvicorn logs its own version of every request. Ours carries the timing
     # and the request id, so printing both would just halve the readability.
     if logger == "uvicorn.access":
-        return [], None
+        return [], []
 
     fields = dict(KEY_VALUE.findall(rest))
-    request_id = match.group("request_id") or ""
+    request_id = safe_request_id(match.group("request_id") or "")
     if not rest.startswith(("request_completed", "request_failed")):
         colour = COLORS["err"] if match.group("level") in ("ERROR", "CRITICAL") else DIM
         meta = {"request_id": request_id} if request_id else None
-        return [f"{colour}{clock} {rest}{RESET}".rstrip()], meta
+        return [f"{colour}{clock} {rest}{RESET}".rstrip()], [(rest.rstrip(), meta)]
 
     method = fields.get("method", "?")
     raw_path = fields.get("path", "?")
@@ -750,7 +899,20 @@ def render_api(text: str) -> tuple[list[str], dict | None]:
     if note:
         highlight = COLORS["err"] + BOLD if "SOS" in note else COLORS["run"]
         lines.append(f"        {highlight}└─ {note}{RESET}")
-    return lines, {"request_id": request_id, "status": status, "ms": milliseconds}
+
+    # One record, not two: the note belongs to this request, so the console
+    # renders it inside the same row rather than as a second line to scroll past.
+    record: dict = {
+        "request_id": request_id,
+        "status": status,
+        "ms": milliseconds,
+        "method": method,
+        "path": path,
+        "note": note,
+    }
+    # The text is what search, export and the repeat-collapse work on, so it
+    # carries the same words without the clock or the column padding.
+    return lines, [(f"{method} {path} {status} {duration}ms", record)]
 
 
 # --------------------------------------------------------------------------- #
@@ -806,6 +968,9 @@ def open_window(
         import webbrowser
 
         webbrowser.open(url)
+        # Nothing to track: the default browser was already running, so there is
+        # no process of ours to close. Say so rather than pretend otherwise.
+        say(f"opened {name} in the default browser — close that tab by hand later")
         return
 
     profile = PROFILES / name
@@ -831,7 +996,14 @@ def open_window(
         # phone still asks once, as it should.
         flags.append("--ignore-certificate-errors")
     process = subprocess.Popen(flags, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    browsers.append(process)
+    # Drop handles for windows already closed, so reopening one from the Control
+    # tab twenty times does not retain twenty OS process handles.
+    browsers[:] = [pair for pair in browsers if pair[1].poll() is None]
+    browsers.append((name, process))
+    # In the job too, so a crash of this runner does not leave windows showing
+    # pages that no longer have a server behind them. Best effort: Chrome nests
+    # its own sandbox jobs, and adopt() swallows a refusal.
+    adopt(KILL_JOB, process)
 
 
 class Tiler:
@@ -970,7 +1142,8 @@ def make_certificate(python: str, host: str) -> tuple[str, str] | None:
     )
     if result.returncode != 0 or not cert.is_file():
         fail("could not generate a certificate for phone testing:")
-        say(f"  {(result.stderr or '').strip().splitlines()[-1:] or ''}")
+        reported = (result.stderr or "").strip().splitlines()
+        say(f"  {reported[-1] if reported else 'no reason given'}")
         return None
     marker.write_text(host, encoding="utf-8")
     return str(cert), str(key)
@@ -1010,15 +1183,33 @@ def make_qr_codes(python: str, urls: list[str]) -> dict[str, str]:
 SAFE_QUERY = re.compile(r"^\s*(select|with)\b", re.I)
 
 
+_SQLITE_FILE: Path | None = None
+_SQLITE_RESOLVED = False
+
+
 def sqlite_file() -> Path | None:
-    """The local database file, when the backend is running on SQLite."""
-    url = os.environ.get("DATABASE_URL") or load_dotenv(BACKEND / ".env").get(
-        "DATABASE_URL", ""
-    )
+    """The local database file, when the backend is running on SQLite.
+
+    Worked out once. The console polls state every three seconds, and this used
+    to re-read and re-parse `.env` each time for a path that cannot change during
+    a run — and a `.env` saved in the system codepage made `load_dotenv` raise
+    there, which the console reported as "runner not reachable".
+    """
+    global _SQLITE_FILE, _SQLITE_RESOLVED
+    if _SQLITE_RESOLVED:
+        return _SQLITE_FILE
+    _SQLITE_RESOLVED = True
+    try:
+        url = os.environ.get("DATABASE_URL") or load_dotenv(BACKEND / ".env").get(
+            "DATABASE_URL", ""
+        )
+    except (OSError, UnicodeDecodeError):
+        return None
     if "sqlite" not in url:
         return None
     tail = url.split("///")[-1]
-    return (BACKEND / tail).resolve() if tail.startswith(".") else Path(tail)
+    _SQLITE_FILE = (BACKEND / tail).resolve() if tail.startswith(".") else Path(tail)
+    return _SQLITE_FILE
 
 
 def read_only_db() -> sqlite3.Connection:
@@ -1043,7 +1234,9 @@ class Console:
         self.ports = ports
         self.python = python
         self.api_env = api_env
-        self.started = time.time()
+        # Monotonic: a clock step from NTP, or a laptop resuming, used to render
+        # "up -1m -5s" in the header.
+        self.started = time.monotonic()
         self.browser: str | None = None
         self.windows: list[dict] = []  # every window opened, so it can reopen one
         self.people: list[dict] = []  # who is signed in where
@@ -1053,6 +1246,9 @@ class Console:
         # Started in main() once the services exist, so it can attribute usage
         # to this run's own processes rather than only reporting a total.
         self.monitor = None
+        # tag -> (answering, when), so the port probe in state() runs at its own
+        # pace rather than on every three-second poll.
+        self._probe_cache: dict[str, tuple[bool, float]] = {}
 
     # -- the voice server, which owns the model settings -------------------- #
 
@@ -1170,19 +1366,22 @@ class Console:
             if tag not in SPECS:
                 continue
             process = SPECS[tag].get("process")
+            port = {
+                "api": self.ports["api"],
+                "parent": self.ports["parent"],
+                "dash": self.ports["dash"],
+                "watch": self.ports["watch"],
+                "voice": self.ports["voice"],
+            }.get(tag)
+            alive = running(tag)
             services.append(
                 {
                     "tag": tag,
                     "label": label,
-                    "running": running(tag),
+                    "running": alive,
+                    "answering": self._answering(tag, port) if alive else False,
                     "pid": process.pid if process else None,
-                    "port": {
-                        "api": self.ports["api"],
-                        "parent": self.ports["parent"],
-                        "dash": self.ports["dash"],
-                        "watch": self.ports["watch"],
-                        "voice": self.ports["voice"],
-                    }.get(tag),
+                    "port": port,
                 }
             )
         database = sqlite_file()
@@ -1192,13 +1391,42 @@ class Console:
             "people": self.people,
             "ports": self.ports,
             "phone": self.phone,
-            "uptime": int(time.time() - self.started),
+            "uptime": int(time.monotonic() - self.started),
             "database": {
                 "path": str(database) if database else None,
                 "kind": "sqlite" if database else "postgresql",
-                "size": database.stat().st_size if database and database.is_file() else 0,
+                "size": self._database_size(database),
             },
         }
+
+    @staticmethod
+    def _database_size(database: Path | None) -> int:
+        if database is None:
+            return 0
+        try:
+            return database.stat().st_size
+        except OSError:
+            # `reset-db` deletes and rebuilds the file; a poll landing in that
+            # gap must not make the whole state request fail.
+            return 0
+
+    def _answering(self, tag: str, port: int | None) -> bool:
+        """Is anything actually listening, or is only the supervisor alive?
+
+        `uvicorn --reload` keeps its reloader running when the app fails to
+        import, and npm keeps running when its node child dies. The process
+        check alone therefore showed a green dot beside an API serving nothing.
+        Probed at most every few seconds, because state is polled constantly.
+        """
+        if port is None:
+            return True
+        now = time.monotonic()
+        cached = self._probe_cache.get(tag)
+        if cached is not None and now - cached[1] < 4.0:
+            return cached[0]
+        answering = port_in_use(port)
+        self._probe_cache[tag] = (answering, now)
+        return answering
 
     def health(self) -> dict:
         """What the machine looks like right now.
@@ -1219,8 +1447,13 @@ class Console:
             process = spec.get("process")
             if process is not None:
                 labels[process.pid] = tag
-        for row in snapshot.get("own_processes", []):
-            row["tag"] = labels.get(row["pid"], "?")
+        # Copies: the rows the snapshot returned still belong to the monitor's own
+        # history, and annotating them in place was a write into another thread's
+        # state from this HTTP thread.
+        snapshot["own_processes"] = [
+            {**row, "tag": labels.get(row["pid"], "?")}
+            for row in snapshot.get("own_processes", [])
+        ]
         return snapshot
 
     def track_processes(self) -> None:
@@ -1246,7 +1479,10 @@ class Console:
             "open-docs": self._open_docs,
             "test-sos": self._test_sos,
             "test-flag": self._test_flag,
+            "reclaim-space": self._reclaim_space,
+            "reap-orphans": self._reap_orphans,
             "stop-all": self._stop_all,
+            "shutdown": self._stop_all,
         }.get(name)
         if handler is None:
             return {"ok": False, "message": f"unknown action: {name}"}
@@ -1255,6 +1491,86 @@ class Console:
         except Exception as error:  # a broken button must not take the run down
             fail(f"console action '{name}' failed: {error}")
             return {"ok": False, "message": str(error)}
+
+    def _reclaim_space(self, payload: dict) -> str:
+        """Delete the caches and test leftovers, and say how much came back.
+
+        The system drive is where Windows keeps the page file and every temp
+        file, so this is not housekeeping for its own sake: a full C: is felt as
+        the whole machine being slow. A full test suite leaves a SQLite database
+        per test behind, and pytest keeps the last few runs.
+
+        Only ever removes regenerable things. Never the local database, never
+        node_modules, never anything under the project's source.
+        """
+        import tempfile
+
+        targets: list[Path] = []
+        temp_root = Path(tempfile.gettempdir())
+        # pytest keeps the last three runs by default; older ones are dead
+        # weight, and each holds one SQLite file per test.
+        pytest_root = temp_root / f"pytest-of-{os.environ.get('USERNAME', '')}"
+        if pytest_root.is_dir():
+            runs = sorted(
+                (d for d in pytest_root.iterdir() if d.is_dir()),
+                key=lambda d: d.stat().st_mtime,
+                reverse=True,
+            )
+            targets.extend(runs[2:])  # keep the two most recent
+        for cache in (
+            BACKEND / ".pytest_cache",
+            BACKEND / ".mypy_cache",
+            BACKEND / ".ruff_cache",
+            ROOT / ".pytest_cache",
+            ROOT / ".ruff_cache",
+            ROOT / "__pycache__",
+        ):
+            if cache.exists():
+                targets.append(cache)
+
+        freed = 0
+        removed = 0
+        for target in targets:
+            try:
+                size = sum(
+                    f.stat().st_size for f in target.rglob("*") if f.is_file()
+                )
+            except OSError:
+                size = 0
+            try:
+                shutil.rmtree(target, ignore_errors=True)
+                if not target.exists():
+                    freed += size
+                    removed += 1
+            except OSError:
+                continue
+
+        megabytes = freed / (1024 * 1024)
+        return (
+            f"removed {removed} cache/leftover folder(s), freeing "
+            f"{megabytes:.0f} MB. Caches rebuild on the next run."
+        )
+
+    def _reap_orphans(self, payload: dict) -> str:
+        """Stop Gamira processes this run is not supervising."""
+        orphans = find_orphans()
+        supervised = {
+            spec["process"].pid
+            for spec in SPECS.values()
+            if spec.get("process") is not None
+        }
+        stray = [o for o in orphans if o["pid"] not in supervised]
+        if not stray:
+            return "Nothing stray — every Gamira process belongs to this run."
+        for orphan in stray:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(orphan["pid"])],
+                capture_output=True,
+                timeout=15,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        kinds = ", ".join(sorted({o["kind"] for o in stray}))
+        return f"stopped {len(stray)} stray process(es): {kinds}."
 
     def _restart(self, payload: dict) -> str:
         return restart(str(payload.get("service", "")))
@@ -1272,10 +1588,14 @@ class Console:
                     process.wait(timeout=8)
                 except subprocess.TimeoutExpired:
                     process.kill()
-        result = self._run_seed(reset=True)
-        if api_was_running:
-            restart("api")
-        return result
+        # Whatever the seed does, the API has to come back. A bad migration or a
+        # locked file used to raise straight past the restart and leave the whole
+        # stack without an API, which looks far worse than a failed rebuild.
+        try:
+            return self._run_seed(reset=True)
+        finally:
+            if api_was_running:
+                restart("api")
 
     def _seed(self, payload: dict) -> str:
         return self._run_seed(reset=False)
@@ -1292,7 +1612,8 @@ class Console:
         for line in (finished.stdout or "").splitlines():
             say(line, "db")
         if finished.returncode != 0:
-            raise RuntimeError(finished.stderr.strip().splitlines()[-1:] or "seed failed")
+            reported = (finished.stderr or "").strip().splitlines()
+            raise RuntimeError(reported[-1] if reported else "seed failed")
         return "database rebuilt" if reset else "seed checked"
 
     def _open_window(self, payload: dict) -> str:
@@ -1373,8 +1694,16 @@ class Console:
         return "logs cleared"
 
     def _stop_all(self, payload: dict) -> str:
-        threading.Thread(target=stop_all, daemon=True).start()
-        return "stopping everything"
+        """Ask the main thread to shut everything down.
+
+        Only ever asks. This used to start `stop_all()` on a daemon thread, and
+        because `stop_all()` sets `shutting_down` first, the main loop saw the
+        flag and exited — killing the daemon part-way through, before the waits
+        and the leftover sweep. That is how a "Stop everything" left the worker
+        and both dev servers running.
+        """
+        shutdown_requested.set()
+        return "shutting down — closing the windows and stopping every service"
 
     # -- database ----------------------------------------------------------- #
 
@@ -1444,13 +1773,36 @@ def console_handler(console: Console):
         def log_message(self, *args: Any) -> None:
             """The console polls every second; its own log would drown the run's."""
 
+        def handle_one_request(self) -> None:
+            """Let a client walk away without printing ten lines about it.
+
+            A browser closing its window, reloading, or being killed mid-poll
+            resets the connection, and the stdlib logs a full traceback for it.
+            The console polls every second, so that is a traceback into the very
+            terminal the console is showing — most unhelpfully during a shutdown,
+            which kills this window while a poll is in flight.
+            """
+            try:
+                super().handle_one_request()
+            except (
+                ConnectionResetError,
+                ConnectionAbortedError,
+                BrokenPipeError,
+                TimeoutError,
+            ):
+                self.close_connection = True
+
         def _send(self, status: int, body: bytes, content_type: str) -> None:
-            self.send_response(status)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.send_response(status)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+            except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+                # The window this was for has gone. Nothing to report.
+                self.close_connection = True
 
         def _json(self, status: int, payload: Any) -> None:
             self._send(status, json.dumps(payload).encode("utf-8"), "application/json")
@@ -1460,8 +1812,25 @@ def console_handler(console: Console):
             pairs = [part.split("=", 1) for part in raw.split("&") if "=" in part]
             return {key: urllib.parse.unquote_plus(value) for key, value in pairs}
 
+        def _local(self) -> bool:
+            """Is this request from this machine?
+
+            With `--phone` the console binds every interface so a phone can watch
+            the logs, and it has no authentication of any kind. That is fine for
+            reading; it is not fine for a control plane that can rebuild the
+            database, stop the stack, or read every family's rows straight out of
+            SQLite — the API enforces family isolation and this database browser
+            does not. So off this machine, the console is a window and nothing
+            more.
+            """
+            host = (self.client_address[0] or "").lower()
+            return host in ("127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost")
+
         def do_GET(self) -> None:  # noqa: N802 - stdlib naming
             path = self.path.split("?")[0]
+            if path.startswith("/api/db/") and not self._local():
+                self._json(403, {"error": "The database browser is local-only."})
+                return
             try:
                 if path in ("/", "/index.html"):
                     page = (CONSOLE_DIR / "console.html").read_bytes()
@@ -1502,14 +1871,28 @@ def console_handler(console: Console):
                 else:
                     self._json(404, {"error": "not found"})
             except Exception as error:
-                self._json(400, {"error": str(error)})
+                # 400 said "you asked wrongly", which for /api/state was a lie
+                # the console then reported as "runner not reachable".
+                self._json(500, {"error": str(error)})
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib naming
-            length = int(self.headers.get("Content-Length", "0") or 0)
+            if not self._local():
+                self._json(
+                    403,
+                    {
+                        "error": "This console is read-only from the network. "
+                        "Use it on the machine running it to change anything."
+                    },
+                )
+                return
             try:
-                payload = json.loads(self.rfile.read(length) or b"{}")
-            except json.JSONDecodeError:
-                self._json(400, {"error": "invalid json"})
+                # Inside the try: a malformed Content-Length used to raise out of
+                # this method, dump a traceback into the very log the console is
+                # showing, and close a keep-alive socket with no response at all.
+                length = int(self.headers.get("Content-Length", "0") or 0)
+                payload = json.loads(self.rfile.read(max(0, length)) or b"{}")
+            except (ValueError, json.JSONDecodeError):
+                self._json(400, {"error": "invalid request body"})
                 return
             path = self.path.split("?")[0]
             try:
@@ -1857,17 +2240,28 @@ def main() -> int:
         return 1
     python = backend_python()
 
-    needed = {api_port: ("API", "--api-port")}
+    # A list, not a dict keyed by port: keying by port silently merged two
+    # services asked to share one, and the second Vite then died on --strictPort
+    # with nothing to suggest the flags were the problem.
+    needed = [(api_port, "API", "--api-port")]
     if parents:
-        needed[ports["parent"]] = ("Parent App", "--parent-port")
+        needed.append((ports["parent"], "Parent App", "--parent-port"))
     if dashboards:
-        needed[ports["dash"]] = ("Family Dashboard", "--dashboard-port")
+        needed.append((ports["dash"], "Family Dashboard", "--dashboard-port"))
     if watches:
-        needed[ports["watch"]] = ("watch simulator", "--watch-port")
+        needed.append((ports["watch"], "watch simulator", "--watch-port"))
     console_on = CONSOLE and not args.no_console
     if console_on:
-        needed[ports["console"]] = ("server console", "--console-port")
-    for port, (what, flag) in needed.items():
+        needed.append((ports["console"], "server console", "--console-port"))
+
+    claimed: dict[int, str] = {}
+    for port, what, flag in needed:
+        if port in claimed:
+            fail(f"the {what} and the {claimed[port]} were both given port {port}.")
+            say(f"  give one of them its own: {flag} {port + 100}")
+            return 1
+        claimed[port] = what
+    for port, what, flag in needed:
         if port_in_use(port):
             fail(f"port {port} is already in use ({what}).")
             say(f"  stop whatever is holding it, or move this one: {flag} {port + 100}")
@@ -1947,7 +2341,12 @@ def main() -> int:
         "--host", "127.0.0.1", "--port", str(api_port),
     ]
     if API_RELOAD:
-        api_command.append("--reload")
+        # Watch only the source. Without --reload-dir, uvicorn watches the whole
+        # working directory recursively — which here means the 170 MB .venv plus
+        # the mypy, ruff and pytest caches: thousands of files re-checked
+        # constantly, for a source tree of 1.5 MB. That is background CPU and
+        # disk cost all day for no benefit.
+        api_command += ["--reload", "--reload-dir", "app"]
     spawn(
         "api",
         api_command,
@@ -2025,7 +2424,7 @@ def main() -> int:
         spawn(
             "watch",
             [
-                sys.executable if python == sys.executable else python,
+                python,
                 "-u",
                 str(WATCH_SIM / "sim_server.py"),
                 "--api", f"http://127.0.0.1:{api_port}",
@@ -2060,6 +2459,12 @@ def main() -> int:
         console.track_processes()
     if console_on:
         console_on = start_console(console, "0.0.0.0" if phone_host else "127.0.0.1")
+        if console_on and phone_host:
+            # It has no authentication of any kind, so off this machine it can
+            # only be read: no actions, no database browser. Said out loud,
+            # because a button that does nothing looks like a broken console.
+            say("the console is reachable on your network, and read-only there:")
+            say("  no restarts, no rebuilds, no database browser except on this machine.")
 
     # Every window this run knows how to open, so the console can put one back
     # after it has been closed without restarting the whole stack.
@@ -2163,12 +2568,37 @@ def main() -> int:
 
     try:
         while not shutting_down.is_set():
+            if shutdown_requested.is_set():
+                # A moment for the console window to paint its shutdown screen —
+                # it is closed last, so that screen is where the shutdown is
+                # actually read.
+                time.sleep(1.0)
+                print()
+                say("shutting down from the console")
+                # On this thread, deliberately. As a daemon thread this could not
+                # finish: the main loop saw `shutting_down` and exited, and
+                # interpreter shutdown killed the sweep half-done.
+                stop_all()
+                if console.monitor is not None:
+                    console.monitor.stop()
+                # run.cmd skips its `pause` on this code, so the terminal window
+                # closes with everything else. Ctrl+C and crashes keep their own
+                # codes, so a failure stays readable on screen.
+                return CONSOLE_EXIT
             time.sleep(0.3)
     except KeyboardInterrupt:
         print()
         say("shutting down")
         stop_all()
-    return 0
+        if console.monitor is not None:
+            console.monitor.stop()
+        return 0
+    # Here only because something else called stop_all() — a dev server died, or
+    # the API never came up. That is a failure, and `run.cmd` should not report
+    # success for it.
+    if console.monitor is not None:
+        console.monitor.stop()
+    return 1
 
 
 if __name__ == "__main__":
