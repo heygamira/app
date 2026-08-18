@@ -100,6 +100,16 @@ class ReminderType(StrEnum):
 
 
 class ReminderStatus(StrEnum):
+    """Where one reminder stands.
+
+    ``suggested`` is Gamira's, and it is deliberately not ``active``: a routine
+    she picked up from a conversation prompts nobody and appears on no
+    schedule until a person accepts it. Every query that looks for live
+    reminders already filters on ``active``, so a suggestion is inert by
+    construction rather than by anyone remembering to exclude it.
+    """
+
+    SUGGESTED = "suggested"
     ACTIVE = "active"
     PAUSED = "paused"
     COMPLETED = "completed"
@@ -111,6 +121,7 @@ class TimelineEventType(StrEnum):
     MEDICATION_SKIPPED = "medication_skipped"
     MEDICATION_MISSED = "medication_missed"
     MEDICATION_ADDED = "medication_added"
+    REMINDER_ADDED = "reminder_added"
     REMINDER_COMPLETED = "reminder_completed"
     HEALTH_READING_ADDED = "health_reading_added"
     APPOINTMENT_SCHEDULED = "appointment_scheduled"
@@ -310,6 +321,28 @@ class MessageRole(StrEnum):
 class SummaryKind(StrEnum):
     CONVERSATION = "conversation"
     WEEKLY_CARE = "weekly_care"
+
+
+class MemoryKind(StrEnum):
+    """What sort of thing Gamira is holding on to.
+
+    All of it is ordinary life, and all of it is shown to the person it is
+    about. There is deliberately no clinical kind: a memory is never a health
+    record, a symptom, a diagnosis or anything a doctor would act on, and the
+    only tool that writes one says so in as many words.
+
+    ``mood`` and ``concern`` are the two the after-call review may write and
+    ``remember_this`` may not — an impression of how somebody sounded is not a
+    thing to assert mid-conversation, and it is not a measurement either.
+    """
+
+    PERSON = "person"
+    PREFERENCE = "preference"
+    ROUTINE = "routine"
+    INTEREST = "interest"
+    EVENT = "event"
+    MOOD = "mood"
+    CONCERN = "concern"
 
 
 class ReviewState(StrEnum):

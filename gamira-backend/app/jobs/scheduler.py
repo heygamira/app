@@ -47,6 +47,9 @@ SCHEDULES: tuple[Schedule, ...] = (
         JobType.ALERT_ESCALATION_CHECK, interval_seconds=60, priority=URGENT_PRIORITY
     ),
     Schedule(JobType.LIVE_SESSION_EXPIRY, interval_seconds=300),
+    # Transcripts do not live forever. Hourly is plenty for a rule measured in
+    # days, and cheap when there is nothing past its window.
+    Schedule(JobType.CONVERSATION_RETENTION, interval_seconds=3600),
 )
 
 

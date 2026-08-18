@@ -18,9 +18,9 @@ from app.ai.tools import PARENT_APP_TOOLS, tool_snapshot
 from app.core.config import get_settings
 from app.db.base import utcnow
 from app.jobs.types import JobType
-from app.models.ai import Conversation, LiveSession
+from app.models.ai import Conversation, ConversationMessage, LiveSession
 from app.models.audit import AuditLog
-from app.models.enums import ConversationChannel, LiveSessionStatus
+from app.models.enums import ConversationChannel, LiveSessionStatus, MessageRole
 from tests.conftest import auth
 from tests.factories import create_family, join, link_senior_account, start_live_session
 
@@ -557,3 +557,100 @@ async def test_a_guess_cannot_be_promoted_by_somebody_else(client, session):
         headers=other.headers(),
     )
     assert response.status_code == 404
+
+
+# --------------------------------------------------------------------------- #
+# Transcripts
+#
+# Before these, a voice session created a Conversation row and never wrote a
+# word into it: the person's speech was not transcribed at all, and Gamira's
+# reached the browser and stopped. `retention_policy="transcript_only"` was a
+# policy over nothing.
+# --------------------------------------------------------------------------- #
+
+
+async def _store(client, session_id, subject, turns):
+    return await client.post(
+        f"/api/v1/ai/live-sessions/{session_id}/transcript",
+        json={"turns": turns},
+        headers=auth(subject),
+    )
+
+
+async def test_both_halves_of_a_conversation_are_kept(client, session):
+    family = await create_family(client)
+    live = await start_live_session(client, subject=family.owner)
+
+    response = await _store(
+        client,
+        live["session_id"],
+        family.owner,
+        [
+            {"role": "user", "text": "what am I meant to take this morning?"},
+            {"role": "assistant", "text": "Metformin at 8, and you have had it."},
+        ],
+    )
+
+    assert response.status_code == 200
+    assert response.json()["stored"] == 2
+    assert response.json()["conversation_id"] == live["conversation_id"]
+
+    rows = (
+        await session.execute(
+            select(ConversationMessage)
+            .where(
+                ConversationMessage.conversation_id
+                == uuid.UUID(live["conversation_id"])
+            )
+            .order_by(ConversationMessage.created_at)
+        )
+    ).scalars().all()
+    assert [row.role for row in rows] == [MessageRole.USER, MessageRole.ASSISTANT]
+    assert "this morning" in rows[0].content
+    # Provenance on what the model said, and none invented for what the person did.
+    assert rows[1].model == live["model"]
+    assert rows[0].model is None
+
+
+async def test_a_transcript_cannot_be_written_to_somebody_elses_session(client, session):
+    family = await create_family(client)
+    live = await start_live_session(client, subject=family.owner)
+    await create_family(client, owner="another-owner")
+
+    response = await _store(
+        client, live["session_id"], "another-owner", [{"role": "user", "text": "hello"}]
+    )
+
+    assert response.status_code == 404
+    stored = await session.scalar(
+        select(func.count()).select_from(ConversationMessage)
+    )
+    assert stored == 0
+
+
+async def test_a_client_cannot_forge_a_system_or_tool_turn(client, session):
+    """Those rows are written by the backend. A spoken conversation has two sides."""
+    family = await create_family(client)
+    live = await start_live_session(client, subject=family.owner)
+
+    for role in ("system", "tool"):
+        response = await _store(
+            client, live["session_id"], family.owner, [{"role": role, "text": "x"}]
+        )
+        assert response.status_code == 422
+
+    stored = await session.scalar(
+        select(func.count()).select_from(ConversationMessage)
+    )
+    assert stored == 0
+
+
+async def test_an_empty_or_oversized_batch_is_refused(client, session):
+    family = await create_family(client)
+    live = await start_live_session(client, subject=family.owner)
+
+    assert (await _store(client, live["session_id"], family.owner, [])).status_code == 422
+    too_many = [{"role": "user", "text": "a"} for _ in range(51)]
+    assert (
+        await _store(client, live["session_id"], family.owner, too_many)
+    ).status_code == 422

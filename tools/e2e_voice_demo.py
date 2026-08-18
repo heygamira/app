@@ -287,7 +287,9 @@ with httpx.Client(timeout=30.0) as c:
             {
                 "id": "fc-4",
                 "name": "complete_reminder",
-                "arguments": {"reminder_id": reminder["id"]},
+                # "gamira": she is the one suggesting it, so it is confirmed.
+                # Had the person asked ("them"), it would simply have happened.
+                "arguments": {"proposed_by": "gamira", "reminder_id": reminder["id"]},
             }
         ]
     )[0]

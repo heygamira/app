@@ -29,6 +29,33 @@ class Family:
         return auth(subject or self.owner)
 
 
+def midday_timezone(now: dt.datetime | None = None) -> str:
+    """A fixed-offset zone in which it is, right now, about midday.
+
+    Several tests move a dose "45 minutes ago" and then read back the senior's
+    *local day* — and near local midnight those two disagree. The dose lands on
+    yesterday, today's window comes back empty, and the assertion fails. Which
+    is exactly why this suite used to fail for a few hours each evening and
+    pass again by morning: the tests were fine, the clock was not.
+
+    Pinning the person to a zone where it is the middle of the day removes the
+    ambiguity honestly, without pretending to control the clock or patching
+    ``utcnow`` out from under the code being tested.
+    """
+    now = now or dt.datetime.now(dt.UTC)
+    # Hours to add to UTC to land near noon, folded into the range the Etc
+    # zones actually cover.
+    offset = 12 - now.hour
+    if offset > 14:
+        offset -= 24
+    if offset < -11:
+        offset += 24
+    if offset == 0:
+        return "UTC"
+    # Etc/GMT signs are inverted by POSIX convention: Etc/GMT+5 is UTC-5.
+    return f"Etc/GMT{-offset:+d}"
+
+
 async def create_family(
     client,
     *,

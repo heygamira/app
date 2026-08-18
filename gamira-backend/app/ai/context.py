@@ -42,6 +42,7 @@ from app.models.enums import (
     ReminderStatus,
 )
 from app.models.medication import DoseEvent
+from app.services import memories as memory_service
 from app.services.scheduling import load_timezone
 
 # Enough for a spoken answer, small enough that a Live turn is not carrying a
@@ -297,6 +298,12 @@ async def chat_context(
         "health": await latest_health_readings(session, actor, now=now),
         "appointments": await upcoming_appointments(session, actor, now=now),
         "notifications": await notification_summary(session, actor),
+        # What Gamira has picked up in earlier conversations. Kind and wording
+        # only — the same least-data rule as everything above, and capped by
+        # `services/memories.py` rather than here.
+        "memories": await memory_service.recall_for_prompt(
+            session, senior_profile_id=actor.senior.id
+        ),
     }
 
 

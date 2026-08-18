@@ -2,9 +2,10 @@ import { useCallback, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { AlertCircle, Bell, Check, Pill, Settings as SettingsIcon } from 'lucide-react';
 import { useI18n, langCode } from '@/lib/i18n';
+import { useProactive } from '@/lib/useProactive';
 import { useGeminiVoice } from '@/lib/useGeminiVoice';
 import { useWakeWord } from '@/lib/useWakeWord';
-import { getSettings } from '@/lib/userSettings';
+import { mergeSchedule } from '@/lib/schedule';
 import { useSeniorCare } from '@/lib/useSeniorCare';
 import { doses as dosesApi, sos as sosApi } from '@/api/gamiraClient';
 import {
@@ -18,6 +19,7 @@ import {
 } from '@/api/parentData';
 import GamiraVoiceButton from '@/components/gamira/GamiraVoiceButton';
 import GamiraStatusPill from '@/components/gamira/GamiraStatusPill';
+import ProactiveNudge from '@/components/gamira/ProactiveNudge';
 import GamiraCard from '@/components/gamira/GamiraCard';
 import GamiraScheduleCard from '@/components/gamira/GamiraScheduleCard';
 import GamiraSectionHeader from '@/components/gamira/GamiraSectionHeader';
@@ -54,18 +56,35 @@ export default function Home() {
     return { name: contact.name, phone: contact.phone };
   }, []);
 
+  // Set once the wake word engine exists; used to make the closing sound come
+  // out of the same speaker the wake sound did.
+  const wakeSoundRef = useRef(null);
+
   const voice = useGeminiVoice({
     onOpenSos: openSos,
     onDialContact: dialContact,
     // A dose recorded by voice should appear on this screen straight away.
     onMutation: () => reload({ quiet: true }),
-  });
+    // The conversation ended without a button press — either nothing was said
+    // for a while, or they said goodbye. Say so out loud: otherwise the only
+    // evidence is a status line somebody has put the phone down and is not
+    // reading.
+    onAutoStop: () => wakeSoundRef.current?.('stopped'),
+  }, { timezone: self?.timezone || null });
   const {
     status: voiceStatus,
     active: voiceActive,
     start: startVoice,
     stop: stopVoice,
   } = voice;
+
+  // Gamira speaking first when something has been waiting. She says one short
+  // sentence out loud — no microphone, no session, no cost — and leaves a card.
+  const { nudge, dismiss: dismissNudge } = useProactive({
+    doses,
+    reminders,
+    ready: !loading && Boolean(seniorId),
+  });
 
   // Hands-free activation. The engine holds the microphone and both audio
   // contexts open, so by the time "Gamira" is confirmed the only thing left to
@@ -82,20 +101,19 @@ export default function Home() {
     lang: langCode[lang] || 'en-US',
     telemetry: wakeDebug,
   });
-  const { armed: wakeArmed, arm: armWake, resources: wakeResources } = wake;
+  const { resources: wakeResources } = wake;
+  wakeSoundRef.current = wake.sound;
 
   const handleVoiceButton = useCallback(() => {
-    // The tap that starts a conversation is also the gesture that lets Gamira
-    // listen for its name afterwards.
-    if (!wakeArmed && getSettings().wakeWord?.enabled !== false) armWake();
     if (voiceActive || voiceStatus === 'connecting') {
       stopVoice();
       return;
     }
     // Borrow the detector's microphone when it already has one, so pressing the
-    // button does not open a second stream alongside it.
+    // button does not open a second stream alongside it. (The detector arms
+    // itself on the first touch anywhere — including this one.)
     startVoice({ resources: wakeResources() });
-  }, [wakeArmed, armWake, voiceActive, voiceStatus, stopVoice, startVoice, wakeResources]);
+  }, [voiceActive, voiceStatus, stopVoice, startVoice, wakeResources]);
 
   const voiceLabels = {
     idle: { label: t('voiceIdle'), sub: t('notListening'), button: t('tapToTalk') },
@@ -109,36 +127,39 @@ export default function Home() {
   };
   const labels = voiceLabels[voiceStatus] || voiceLabels.idle;
 
-  // Today's schedule: real dose events, plus the person's active reminders.
-  const schedule = useMemo(() => {
-    const doseRows = doses.map((dose) => ({
-      id: `dose-${dose.id}`,
-      doseId: dose.id,
-      localTime: dose.scheduled_local_time,
-      time: clockTime(dose.scheduled_local_time),
-      title: dose.medication_name || 'Medicine',
-      subtitle: dose.dose_quantity || statusWord(dose.status),
-      done: dose.status === 'taken',
-      open: OPEN_DOSE_STATUSES.includes(dose.status),
-      icon: Pill,
-    }));
-    const reminderRows = reminders
-      .filter((reminder) => reminder.status === 'active')
-      .map((reminder) => ({
-        id: `reminder-${reminder.id}`,
-        doseId: null,
-        localTime: reminder.local_time || '',
-        time: clockTime(reminder.local_time),
-        title: reminder.title,
-        subtitle: reminder.instructions || '',
-        done: false,
-        open: false,
-        icon: Bell,
-      }));
-    return [...doseRows, ...reminderRows].sort((a, b) =>
-      String(a.localTime).localeCompare(String(b.localTime)),
-    );
-  }, [doses, reminders]);
+  // Whether Gamira is listening for its name is not something to leave people
+  // guessing at — especially when the answer is "no, tap once first".
+  const idleSub =
+    voiceStatus === 'idle' && wake.listening ? 'Say “Gamira”, or tap to talk' : labels.sub;
+
+  // Today's schedule: real dose events and the person's active reminders, in
+  // the order the day happens rather than in two lists.
+  const schedule = useMemo(
+    () =>
+      mergeSchedule(doses, reminders, {
+        doseRow: (dose) => ({
+          id: `dose-${dose.id}`,
+          doseId: dose.id,
+          time: clockTime(dose.scheduled_local_time),
+          title: dose.medication_name || 'Medicine',
+          subtitle: dose.dose_quantity || statusWord(dose.status),
+          done: dose.status === 'taken',
+          open: OPEN_DOSE_STATUSES.includes(dose.status),
+          icon: Pill,
+        }),
+        reminderRow: (reminder) => ({
+          id: `reminder-${reminder.id}`,
+          doseId: null,
+          time: clockTime(reminder.local_time),
+          title: reminder.title,
+          subtitle: reminder.instructions || '',
+          done: false,
+          open: false,
+          icon: Bell,
+        }),
+      }),
+    [doses, reminders]
+  );
 
   // The next thing waiting for this person, by clock time.
   const next = useMemo(() => {
@@ -196,7 +217,11 @@ export default function Home() {
             </h1>
             <p className="text-[15px] text-muted-foreground">{t('tapToTalk')}</p>
           </div>
-          <GamiraStatusPill active={voiceActive} label={labels.label} sublabel={labels.sub} />
+          <GamiraStatusPill
+            active={voiceActive || (voiceStatus === 'idle' && wake.listening)}
+            label={labels.label}
+            sublabel={idleSub}
+          />
         </div>
 
         {/* Voice button */}
@@ -236,6 +261,15 @@ export default function Home() {
             </p>
           </GamiraCard>
         )}
+
+        <ProactiveNudge
+          nudge={nudge}
+          onDismiss={dismissNudge}
+          onTalk={() => {
+            dismissNudge();
+            if (!voiceActive) startVoice();
+          }}
+        />
 
         {/* Next thing waiting */}
         {next && (

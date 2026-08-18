@@ -29,6 +29,7 @@ from tests.factories import (
     join,
     link_senior_account,
     list_doses,
+    midday_timezone,
 )
 
 
@@ -96,7 +97,9 @@ async def test_materialising_twice_creates_nothing_new(client, session, run_work
 
 
 async def test_a_get_reflects_the_status_the_worker_derived(client, session, run_worker):
-    family = await create_family(client)
+    # Midday where they live, so "45 minutes ago" is still today for them. Near
+    # local midnight it would not be, and the day this reads back would be empty.
+    family = await create_family(client, timezone=midday_timezone())
     await add_medication(client, family, late_after_minutes=30, missed_after_minutes=120)
     await run_worker()
     await _shift_dose_into_the_past(session, family.senior_id, minutes=45)
@@ -153,7 +156,8 @@ async def test_a_missed_dose_notifies_each_member_exactly_once(
 async def test_a_recorded_dose_is_never_turned_into_a_missed_one(
     client, session, run_worker
 ):
-    family = await create_family(client)
+    # Five hours back has to stay inside their day; see `midday_timezone`.
+    family = await create_family(client, timezone=midday_timezone())
     await add_medication(client, family, missed_after_minutes=60)
     await run_worker()
     dose = (await list_doses(client, family))[0]

@@ -39,6 +39,7 @@ from app.models.enums import (
     ConversationStatus,
     DecisionStatus,
     LiveSessionStatus,
+    MemoryKind,
     MessageRole,
     PolicyResult,
     ReviewState,
@@ -151,6 +152,70 @@ class AiSummary(UUIDPrimaryKey, Timestamps, Base):
     )
     reviewed_by_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     reviewed_at: Mapped[dt.datetime | None] = mapped_column(UtcDateTime())
+
+
+class SeniorMemory(UUIDPrimaryKey, Timestamps, Base):
+    """One small thing Gamira remembers about somebody between conversations.
+
+    A table of its own rather than a column on ``SeniorProfile``. ``notes`` and
+    ``FamilyNote`` are written by people, and mixing model output into them
+    would destroy the one property this codebase guards everywhere: you can
+    always tell who said a thing. Everything here was written by Gamira, and
+    every row carries the conversation it came from and the prompt version that
+    produced it, so a memory that reads oddly can be traced to the exchange that
+    caused it.
+
+    Shown to the person it is about, on their own device, and to their family.
+    Either can delete any of it — which is the other half of being allowed to
+    keep it at all. Deleting sets ``deleted_at``; nothing deleted is ever put
+    back into a prompt.
+
+    What is *not* here: anything clinical. No symptoms, no readings, no
+    diagnoses, no medication. Those have their own tables, their own
+    permissions and their own audit trail, and a paragraph of remembered text is
+    not a substitute for any of them.
+    """
+
+    __tablename__ = "senior_memories"
+    __table_args__ = (
+        Index("uq_senior_memories_dedupe", "dedupe_key", unique=True),
+        Index("ix_senior_memories_senior_created", "senior_profile_id", "created_at"),
+    )
+
+    family_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("families.id", ondelete="CASCADE"), index=True
+    )
+    senior_profile_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("senior_profiles.id", ondelete="CASCADE"), index=True
+    )
+    kind: Mapped[MemoryKind] = mapped_column(
+        Enum(MemoryKind, native_enum=False, length=16), default=MemoryKind.PREFERENCE
+    )
+    content: Mapped[str] = mapped_column(String(400))
+    # Which conversation this came out of, so it can be read in context.
+    source_conversation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("conversations.id", ondelete="SET NULL")
+    )
+    # How sure the model was, 0..1. Recorded and shown; never used to decide
+    # anything on its own.
+    confidence: Mapped[float | None] = mapped_column(Float())
+    # Stops the same thing being remembered once a week forever.
+    dedupe_key: Mapped[str | None] = mapped_column(String(200))
+
+    model: Mapped[str | None] = mapped_column(String(64))
+    provider: Mapped[str | None] = mapped_column(String(32))
+    prompt_version: Mapped[str | None] = mapped_column(String(32))
+    output_schema_version: Mapped[str | None] = mapped_column(String(32))
+    review_state: Mapped[ReviewState] = mapped_column(
+        Enum(ReviewState, native_enum=False, length=16), default=ReviewState.UNREVIEWED
+    )
+    # A later memory that replaces this one, rather than an edit in place: the
+    # history of what Gamira believed is worth keeping.
+    superseded_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("senior_memories.id", ondelete="SET NULL")
+    )
+    deleted_at: Mapped[dt.datetime | None] = mapped_column(UtcDateTime())
+    deleted_by_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
 
 
 class AiDecision(UUIDPrimaryKey, Timestamps, Base):

@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom';
-import { User, Globe, Volume2, ShieldAlert, Accessibility, Headphones, Info, Contrast, ArrowLeft } from 'lucide-react';
+import { User, Globe, Volume2, ShieldAlert, Accessibility, Headphones, Info, Contrast, ArrowLeft, Brain, Users } from 'lucide-react';
 import SettingRow from '@/components/SettingRow';
 import { getSettings } from '@/lib/userSettings';
 import { getStoredTheme } from '@/lib/theme';
@@ -62,6 +62,27 @@ export default function Settings() {
           description={t('voiceDesc')}
           value={t(voiceKey[s.voice] || 'warmFemale')}
           onClick={() => navigate('/settings/voice')}
+        />
+        {/*
+          Directly under Voice, because it is about the same thing: what
+          happens when they talk to Gamira. Somebody who is uneasy about being
+          remembered should not have to hunt for the list.
+        */}
+        <SettingRow
+          icon={Brain}
+          iconBg="bg-primary/10"
+          iconColor="text-primary"
+          title="What Gamira remembers"
+          description="The few things she keeps about you — remove any of them"
+          onClick={() => navigate('/settings/memory')}
+        />
+        <SettingRow
+          icon={Users}
+          iconBg="bg-primary/10"
+          iconColor="text-primary"
+          title="What your family was told"
+          description="Everything Gamira has passed on about you"
+          onClick={() => navigate('/settings/family-notices')}
         />
         <SettingRow
           icon={ShieldAlert}

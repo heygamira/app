@@ -56,9 +56,16 @@ export function useWakeWord(voice, { lang = 'en-US', telemetry: wantTelemetry = 
   const [armed, setArmed] = useState(false);
   const [error, setError] = useState(null);
   const [telemetry, setTelemetry] = useState(null);
+  // Read once. localStorage is not reactive, and a setting that changed
+  // mid-session would want a deliberate re-arm anyway.
+  const [enabled] = useState(() => getSettings().wakeWord?.enabled !== false);
 
   const engineRef = useRef(null);
   const recognitionRef = useRef(null);
+  // Set when arming failed for a reason trying again will not fix — the
+  // microphone was denied, or there is no usable engine. Without this, the
+  // automatic arm below would re-prompt on every single tap.
+  const blockedRef = useRef(false);
   // The hook is rebuilt on every render of the page that owns it; the engine is
   // built once, so its callbacks read the moving parts through refs.
   const voiceRef = useRef(voice);
@@ -139,7 +146,7 @@ export function useWakeWord(voice, { lang = 'en-US', telemetry: wantTelemetry = 
     // Acknowledge first, before any network work. Whatever the rest of this
     // costs, the person knows they were heard inside 50 ms — which is what
     // makes the remainder tolerable.
-    if (getSettings().wakeWord?.chime !== false) engineRef.current?.chime();
+    engineRef.current?.sound('wake', getSettings().wakeWord?.sound ?? 'chime');
 
     // Everything from just before the wake word, so the question asked in the
     // same breath survives the connection delay.
@@ -243,15 +250,17 @@ export function useWakeWord(voice, { lang = 'en-US', telemetry: wantTelemetry = 
    * the chime all require one.
    */
   const arm = useCallback(() => {
-    if (engineRef.current || recognitionRef.current) return;
+    if (engineRef.current || recognitionRef.current || blockedRef.current) return;
     setError(null);
 
     const settings = getSettings().wakeWord || {};
     const preferred = settings.engine || 'auto';
 
     if (preferred === 'speech') {
-      setArmed(startSpeechFallback());
-      setEngine(recognitionRef.current ? 'speech' : 'off');
+      const started = startSpeechFallback();
+      blockedRef.current = !started;
+      setArmed(started);
+      setEngine(started ? 'speech' : 'off');
       return;
     }
 
@@ -280,19 +289,16 @@ export function useWakeWord(voice, { lang = 'en-US', telemetry: wantTelemetry = 
         // eslint-disable-next-line no-console
         console.warn('Gamira wake word: falling back to SpeechRecognition —', err.message);
         engineRef.current = null;
-        if (preferred === 'onnx') {
+        if (preferred === 'onnx' || !startSpeechFallback()) {
+          // Nothing left to try. Latched so the automatic arm does not ask for
+          // the microphone again on every tap.
+          blockedRef.current = true;
           setError(err);
           setArmed(false);
           setEngine('off');
           return;
         }
-        if (startSpeechFallback()) {
-          setEngine('speech');
-        } else {
-          setError(err);
-          setArmed(false);
-          setEngine('off');
-        }
+        setEngine('speech');
       },
     });
   }, [startSpeechFallback, onMaybe, onDetect, onRelease, wantTelemetry]);
@@ -301,6 +307,32 @@ export function useWakeWord(voice, { lang = 'en-US', telemetry: wantTelemetry = 
     if (armed) disarm();
     else arm();
   }, [armed, arm, disarm]);
+
+  /**
+   * Start listening on the first touch anywhere in the app.
+   *
+   * Opening the microphone, resuming both AudioContexts and unlocking audio
+   * playback for the chime all require a user gesture, so *some* interaction
+   * has to come first — but it must not be the microphone button. That button
+   * also starts a conversation, and a live conversation pauses the detector, so
+   * tying arming to it meant the wake word only ever began working after
+   * somebody had started and then ended a call by hand. Which is to say: it
+   * never appeared to work at all.
+   *
+   * Any tap will do, and people tap. Capture phase so it fires even where a
+   * handler stops propagation.
+   */
+  useEffect(() => {
+    if (!enabled || armed || blockedRef.current) return;
+    const options = { once: true, capture: true };
+    const onGesture = () => arm();
+    window.addEventListener('pointerdown', onGesture, options);
+    window.addEventListener('keydown', onGesture, options);
+    return () => {
+      window.removeEventListener('pointerdown', onGesture, options);
+      window.removeEventListener('keydown', onGesture, options);
+    };
+  }, [enabled, armed, arm]);
 
   // While a conversation is live the detector stops scoring — Gamira's own
   // replies are in the room, and it should not wake itself. Everything stays
@@ -323,6 +355,9 @@ export function useWakeWord(voice, { lang = 'en-US', telemetry: wantTelemetry = 
     /** 'onnx' | 'speech' | 'off' */
     engine,
     armed,
+    /** Listening for its name right now, as opposed to merely started. */
+    listening: armed && engine !== 'off',
+    enabled,
     error,
     /** Live scores and counters, for the ?wake=debug overlay. */
     telemetry,
@@ -331,5 +366,11 @@ export function useWakeWord(voice, { lang = 'en-US', telemetry: wantTelemetry = 
     toggle,
     /** Warm microphone and audio contexts for a session started by hand. */
     resources,
+    /**
+     * Make one of Gamira's sounds through the engine's live playback context.
+     * Used for the end-of-conversation sound, which belongs to the session
+     * rather than to the detector but shares the same speaker.
+     */
+    sound: useCallback((event, voice) => engineRef.current?.sound(event, voice), []),
   };
 }

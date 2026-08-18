@@ -22,7 +22,10 @@ class JobType:
 
     # AI. Every one of these may fail without affecting the list above.
     AI_WEEKLY_SUMMARY: Final = "ai.weekly_summary"
+    AI_CONVERSATION_REVIEW: Final = "ai.conversation_review"
+    AI_FAMILY_NOTICE: Final = "ai.family_notice"
     LIVE_SESSION_EXPIRY: Final = "ai.live_sessions.expire"
+    CONVERSATION_RETENTION: Final = "ai.conversations.retention"
 
 
 __all__ = ["JobType"]

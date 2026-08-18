@@ -48,12 +48,16 @@ from app.models.ai import (
     Conversation,
     ConversationMessage,
     LiveSession,
+    SeniorMemory,
 )
+from app.models.care import NotificationDelivery
 from app.models.enums import (
     ConfirmationState,
     ConversationChannel,
     ConversationStatus,
     MessageRole,
+    NotificationChannel,
+    NotificationType,
 )
 from app.models.identity import SeniorProfile
 from app.models.jobs import BackgroundJob
@@ -64,14 +68,19 @@ from app.schemas.ai import (
     ChatRequest,
     ChatResponse,
     DecisionOutcome,
+    FamilyNoticeOut,
     LiveSessionOut,
     LiveSessionRequest,
+    SeniorMemoryOut,
     SummaryAccepted,
     SummaryRequest,
     ToolCallBatchIn,
     ToolCallBatchOut,
     ToolCallResult,
+    TranscriptBatchIn,
+    TranscriptBatchOut,
 )
+from app.services import memories as memory_service
 from app.services.authz import active_memberships, require_membership, resolve_senior
 from app.services.timeline import record_audit
 
@@ -458,6 +467,56 @@ async def handle_tool_calls(
     return ToolCallBatchOut(session_id=live_session.id, results=results)
 
 
+@router.post(
+    "/live-sessions/{session_id}/transcript", response_model=TranscriptBatchOut
+)
+async def store_transcript(
+    session_id: uuid.UUID,
+    payload: TranscriptBatchIn,
+    session: SessionDep,
+    user: CurrentUser,
+) -> TranscriptBatchOut:
+    """Keep what was said in a voice conversation.
+
+    Until this existed, a voice session created a `Conversation` row and never
+    put a word in it: `output_audio_transcription` reached the browser and
+    stopped there, and the person's own speech was not transcribed at all. So
+    `retention_policy="transcript_only"` described a policy over nothing, Gamira
+    could not remember a conversation it had just had, and there was no record
+    of what it was asked or what it answered.
+
+    The text is untrusted content — it is whatever was said in a room, and the
+    prompts that later read it say so. It is stored, never executed.
+    """
+    live_session = await _owned_live_session(session, session_id=session_id, user=user)
+    if live_session.conversation_id is None:  # pragma: no cover - always set at mint
+        raise NotFound("That session has no conversation to write to.")
+
+    for turn in payload.turns:
+        session.add(
+            ConversationMessage(
+                conversation_id=live_session.conversation_id,
+                role=(
+                    MessageRole.USER
+                    if turn.role == "user"
+                    else MessageRole.ASSISTANT
+                ),
+                content=turn.text,
+                model=live_session.model if turn.role == "assistant" else None,
+                provider=live_session.provider if turn.role == "assistant" else None,
+                prompt_version=(
+                    live_session.prompt_version if turn.role == "assistant" else None
+                ),
+            )
+        )
+    live_session.last_seen_at = utcnow()
+    await session.flush()
+
+    return TranscriptBatchOut(
+        conversation_id=live_session.conversation_id, stored=len(payload.turns)
+    )
+
+
 @router.post("/live-sessions/{session_id}/close", response_model=None, status_code=204)
 async def close_live_session(
     session_id: uuid.UUID, session: SessionDep, user: CurrentUser
@@ -467,6 +526,112 @@ async def close_live_session(
     if live_session is None or live_session.user_id != user.id:
         raise NotFound("The requested session does not exist.")
     await live_service.close_live_session(session, live_session=live_session)
+
+
+# --------------------------------------------------------------------------- #
+# Memory
+#
+# Both apps read these. The senior sees them on their own device and the family
+# in the dashboard, and either can delete any of them — which is the condition
+# on which keeping them is reasonable at all. There is deliberately no endpoint
+# to *write* one: memories are Gamira's, and a human-authored note belongs in
+# `family_notes` where its author is recorded.
+# --------------------------------------------------------------------------- #
+
+
+@router.get("/seniors/{senior_id}/memories", response_model=list[SeniorMemoryOut])
+async def list_memories(
+    senior_id: uuid.UUID,
+    session: SessionDep,
+    user: CurrentUser,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> list[SeniorMemoryOut]:
+    """What Gamira remembers about this person, newest first."""
+    await resolve_senior(session, user_id=user.id, senior_id=senior_id)
+    rows = await memory_service.recent_memories(
+        session, senior_profile_id=senior_id, limit=limit
+    )
+    return [SeniorMemoryOut.model_validate(row) for row in rows]
+
+
+@router.delete("/memories/{memory_id}", response_model=None, status_code=204)
+async def forget_memory(
+    memory_id: uuid.UUID, session: SessionDep, user: CurrentUser
+) -> None:
+    """Stop using one memory.
+
+    Any active member of the family may do this, including the cared-for person
+    themselves — forgetting something about yourself is not a care action, and
+    requiring a write role would leave the person it is about unable to remove
+    it. Who did it is recorded on the row and in the audit log.
+    """
+    memory = await session.get(SeniorMemory, memory_id)
+    if memory is None:
+        raise NotFound("The requested memory does not exist.")
+    await require_membership(session, user_id=user.id, family_id=memory.family_id)
+    await memory_service.forget(session, memory=memory, user_id=user.id)
+    await record_audit(
+        session,
+        action="ai.memory.forget",
+        actor_user_id=user.id,
+        target_type="senior_memory",
+        target_id=memory.id,
+        family_id=memory.family_id,
+    )
+
+
+@router.get(
+    "/seniors/{senior_id}/family-notices", response_model=list[FamilyNoticeOut]
+)
+async def list_family_notices(
+    senior_id: uuid.UUID,
+    session: SessionDep,
+    user: CurrentUser,
+    limit: int = Query(default=20, ge=1, le=100),
+) -> list[FamilyNoticeOut]:
+    """What Gamira has told this person's family about them.
+
+    For the person themselves, chiefly. The persona promises to say so to them
+    first and openly, and openly has to survive the conversation ending —
+    somebody should be able to check what was said about them without having to
+    ask anybody.
+
+    One row per notice, not per recipient. The same message goes to every
+    active member, so grouping by dedupe key turns three delivery rows back
+    into the one thing that was actually said.
+    """
+    await resolve_senior(session, user_id=user.id, senior_id=senior_id)
+    rows = (
+        await session.execute(
+            select(NotificationDelivery)
+            .where(
+                NotificationDelivery.senior_profile_id == senior_id,
+                NotificationDelivery.type == NotificationType.FAMILY_UPDATE,
+                NotificationDelivery.channel == NotificationChannel.IN_APP,
+            )
+            .order_by(NotificationDelivery.created_at.desc())
+            .limit(limit * 8)
+        )
+    ).scalars()
+
+    grouped: dict[str, list[NotificationDelivery]] = {}
+    for row in rows:
+        # Everything after the trailing ":<user_id>" is the notice itself.
+        key = (row.dedupe_key or str(row.id)).rsplit(":", 1)[0]
+        grouped.setdefault(key, []).append(row)
+
+    notices = [
+        FamilyNoticeOut(
+            id=group[0].id,
+            title=group[0].title,
+            body=group[0].body,
+            created_at=group[0].created_at,
+            recipients=len(group),
+        )
+        for group in grouped.values()
+    ]
+    notices.sort(key=lambda notice: notice.created_at, reverse=True)
+    return notices[:limit]
 
 
 # --------------------------------------------------------------------------- #

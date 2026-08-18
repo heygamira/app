@@ -22,8 +22,13 @@ export const CLIENT_TOOLS = {
   navigate_to_screen: { confirm: false },
   open_dose_details: { confirm: false },
   open_reminder_details: { confirm: false },
-  // Opens the real SOS confirmation. It does not raise anything: the person
-  // presses the red button themselves, exactly as they would without voice.
+  // Everyday things that need no record and change nothing.
+  get_current_time: { confirm: false },
+  get_weather: { confirm: false },
+  end_conversation: { confirm: false },
+  // Opens the SOS screen and starts a countdown the person can cancel. It
+  // still raises nothing outside this app: an in-app alert their family sees,
+  // and then the dialer, exactly as pressing the button does.
   prepare_sos: { confirm: true },
   prepare_call_contact: { confirm: true },
 };
@@ -53,6 +58,43 @@ export const toolError = (code, message, extra = {}) => ({
 });
 
 export const toolOk = (payload = {}) => ({ status: 'ok', ...payload });
+
+/**
+ * Where this device is, or null.
+ *
+ * Resolves to null rather than rejecting on refusal or timeout: somebody
+ * declining location should get "I cannot check the weather", not an error.
+ */
+function currentPosition(timeoutMs = 8000) {
+  if (!navigator.geolocation) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve({ latitude: pos.coords.latitude, longitude: pos.coords.longitude }),
+      () => resolve(null),
+      { timeout: timeoutMs, maximumAge: 15 * 60 * 1000 }
+    );
+  });
+}
+
+/**
+ * WMO weather codes in words. The same vocabulary the family dashboard uses.
+ *
+ * Plain descriptions only — nothing here should read as advice about whether
+ * it is a good idea to go outside.
+ */
+function describeWeatherCode(code) {
+  if (code === null || code === undefined) return 'unknown';
+  if (code === 0) return 'clear';
+  if (code <= 2) return 'partly cloudy';
+  if (code === 3) return 'cloudy';
+  if (code <= 48) return 'foggy';
+  if (code <= 57) return 'drizzle';
+  if (code <= 67) return 'rain';
+  if (code <= 77) return 'snow';
+  if (code <= 82) return 'rain showers';
+  if (code <= 86) return 'snow showers';
+  return 'a thunderstorm';
+}
 
 /**
  * @typedef {object} CheckedCall
@@ -101,6 +143,8 @@ export function validateFunctionCall(call) {
  * @param {(id: string) => void} [handlers.openReminder]
  * @param {() => void} [handlers.openSos]
  * @param {(contactId: string) => {name?: string, phone?: string} | null} [handlers.openDialer]
+ * @param {() => void} [handlers.endConversation]  close the session and stop listening
+ * @param {string | null} [handlers.timezone]  the cared-for person's timezone
  */
 export function createUiDispatcher({
   navigate,
@@ -108,6 +152,8 @@ export function createUiDispatcher({
   openReminder,
   openSos,
   openDialer,
+  endConversation,
+  timezone = null,
 }) {
   return async function dispatch(name, args) {
     switch (name) {
@@ -140,17 +186,70 @@ export function createUiDispatcher({
         return toolOk({ message: 'Showing that reminder on screen.' });
       }
 
+      case 'get_current_time': {
+        const now = new Date();
+        const zone = timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
+        const fmt = (options) =>
+          new Intl.DateTimeFormat('en-GB', { timeZone: zone, ...options }).format(now);
+        return toolOk({
+          time: fmt({ hour: 'numeric', minute: '2-digit', hour12: true }),
+          weekday: fmt({ weekday: 'long' }),
+          date: fmt({ day: 'numeric', month: 'long', year: 'numeric' }),
+          iso: now.toISOString(),
+          timezone: zone,
+        });
+      }
+
+      case 'get_weather': {
+        const where = await currentPosition();
+        if (!where) {
+          return toolError(
+            'dependency_unavailable',
+            'I cannot tell where they are, so I cannot check the weather.'
+          );
+        }
+        try {
+          const response = await fetch(
+            'https://api.open-meteo.com/v1/forecast' +
+              `?latitude=${where.latitude}&longitude=${where.longitude}` +
+              '&current=temperature_2m,apparent_temperature,weather_code'
+          );
+          if (!response.ok) throw new Error(String(response.status));
+          const body = await response.json();
+          const current = body?.current || {};
+          return toolOk({
+            temperature_c: current.temperature_2m ?? null,
+            feels_like_c: current.apparent_temperature ?? null,
+            conditions: describeWeatherCode(current.weather_code),
+          });
+        } catch {
+          return toolError('dependency_unavailable', 'I could not reach the weather service.');
+        }
+      }
+
+      case 'end_conversation': {
+        if (!endConversation) {
+          return toolError('dependency_unavailable', 'I cannot close this from here.');
+        }
+        // Deferred a beat so this response reaches the model — and so the
+        // goodbye it already spoke finishes playing — before the socket goes.
+        setTimeout(endConversation, 1200);
+        return toolOk({ message: 'Saying goodbye and closing the session.' });
+      }
+
       case 'prepare_sos': {
         if (!openSos) {
           return toolError('dependency_unavailable', 'The SOS screen is not available here.');
         }
         openSos();
-        // Deliberate wording: the screen is open, and that is all. Saying
-        // anything else would let the model imply help is coming.
+        // Deliberate wording. The countdown is running, and what it will do is
+        // raise an in-app alert — nothing more. Anything vaguer would let the
+        // model imply that help is coming.
         return toolOk({
           message:
-            'The emergency screen is open. They still have to press it themselves — ' +
-            'Gamira has not contacted anyone.',
+            'The emergency screen is open and counting down. It will alert their ' +
+            'family inside Gamira unless they cancel. Nobody outside the app has ' +
+            'been contacted, and no call has been placed.',
         });
       }
 

@@ -87,6 +87,16 @@ export default function VoiceConfirmDialog({
             <p className="mt-2 text-[15px] text-muted-foreground">
               Nothing has changed yet.
             </p>
+            {/*
+              The buttons are not the only way out of this, and somebody who
+              cannot easily reach the phone should not have to discover that.
+              Gamira is still listening — saying yes or no does the same thing.
+            */}
+            {!busy && (
+              <p className="mt-3 text-[15px] font-medium text-primary">
+                Or just say “yes” or “no”.
+              </p>
+            )}
 
             <div className="mt-6 flex flex-col gap-3">
               <button

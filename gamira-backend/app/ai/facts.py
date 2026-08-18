@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.ai.schemas import (
     AppointmentFact,
     CareFacts,
+    ConversationFacts,
     DeviceFacts,
     DoseFacts,
     FamilyActivityFacts,
@@ -29,6 +30,7 @@ from app.ai.schemas import (
     ReminderFacts,
 )
 from app.db.base import utcnow
+from app.models.ai import AiSummary, Conversation
 from app.models.alerts import Alert
 from app.models.care import (
     Appointment,
@@ -44,6 +46,7 @@ from app.models.enums import (
     DoseStatus,
     HealthSource,
     ReminderStatus,
+    SummaryKind,
 )
 from app.models.identity import SeniorProfile
 from app.models.medication import DoseEvent
@@ -89,6 +92,7 @@ async def build_care_facts(
     devices = await _device_facts(session, senior.id, now)
     appointments = await _upcoming_appointments(session, senior.id, now)
     activity = await _family_activity(session, senior, window_start, window_end)
+    talk = await _conversation_facts(session, senior.id, window_start, window_end)
 
     facts = CareFacts(
         senior_name=senior.preferred_name,
@@ -101,10 +105,73 @@ async def build_care_facts(
         devices=devices,
         upcoming_appointments=appointments,
         family_activity=activity,
+        conversation=talk,
     )
     facts.data_freshness_warning = freshness_warning(facts)
     return facts
 
+
+async def _conversation_facts(
+    session: AsyncSession,
+    senior_id: uuid.UUID,
+    window_start: dt.datetime,
+    window_end: dt.datetime,
+) -> ConversationFacts:
+    """What the after-call reviews of this period recorded.
+
+    Read back rather than recomputed: the reviews already happened, one per
+    conversation, and re-reading their own recorded impression is what keeps
+    the weekly digest and the daily one from ever disagreeing.
+
+    `reviewed` is reported alongside `conversations` on purpose. A week with
+    nine conversations and one review is not a quiet week — it is a week the
+    reviewer could not keep up with, and the difference must be visible rather
+    than averaged away.
+    """
+    conversations = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(Conversation)
+            .where(
+                Conversation.senior_profile_id == senior_id,
+                Conversation.started_at >= window_start,
+                Conversation.started_at < window_end,
+            )
+        )
+        or 0
+    )
+
+    rows = list(
+        (
+            await session.execute(
+                select(AiSummary).where(
+                    AiSummary.senior_profile_id == senior_id,
+                    AiSummary.kind == SummaryKind.CONVERSATION,
+                    AiSummary.generated_at >= window_start,
+                    AiSummary.generated_at < window_end,
+                )
+            )
+        ).scalars()
+    )
+
+    moods: dict[str, int] = {}
+    themes: list[str] = []
+    for row in rows:
+        for line in (row.content or "").splitlines():
+            text = line.strip()
+            if text.startswith("How it sounded:"):
+                word = text.removeprefix("How it sounded:").strip().rstrip(".")
+                if word:
+                    moods[word] = moods.get(word, 0) + 1
+            elif text.startswith("- ") and len(themes) < 5:
+                themes.append(text[2:])
+
+    return ConversationFacts(
+        conversations=conversations,
+        reviewed=len(rows),
+        moods=moods,
+        themes=themes,
+    )
 
 def freshness_warning(facts: CareFacts) -> str | None:
     """Say plainly when the figures rest on very little.

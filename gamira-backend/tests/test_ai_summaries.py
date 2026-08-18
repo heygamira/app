@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
 
@@ -87,7 +88,7 @@ async def test_a_summary_records_its_full_provenance(
     assert summary.source_reference["tables"]
     assert summary.model == ai_provider.model
     assert summary.provider == "fake"
-    assert summary.prompt_version == "weekly_care_summary@1"
+    assert summary.prompt_version == "weekly_care_summary@2"
     assert summary.output_schema_version == "1"
     assert summary.generated_at is not None
     # Nothing Gamira generates starts out reviewed.
@@ -337,5 +338,14 @@ async def test_the_scheduler_registers_the_live_session_expiry_sweep(
     assert job.status is JobStatus.SUCCEEDED
 
 
+# The senior's timezone, which is what a summary period is resolved in. The
+# default family lives in Asia/Kolkata, so between 18:30 and midnight UTC the
+# UTC date is a day behind theirs — and a period asked for in UTC days would
+# miss the dose that was just recorded. That mismatch, not the counting, is
+# what used to fail here every evening.
+FAMILY_TZ = ZoneInfo("Asia/Kolkata")
+
+
 def _today() -> str:
-    return dt.datetime.now(dt.UTC).date().isoformat()
+    """Today where the cared-for person is."""
+    return dt.datetime.now(FAMILY_TZ).date().isoformat()

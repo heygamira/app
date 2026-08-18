@@ -92,6 +92,25 @@ class FamilyActivityFacts(StrictModel):
     sos_alerts_acknowledged: int = 0
 
 
+class ConversationFacts(StrictModel):
+    """How much Gamira and this person actually talked, and how it sounded.
+
+    Counted from `ai_summaries` rows written by the after-call review, not
+    inferred here: `moods` is a tally of the single plain word each review
+    recorded, and `themes` are the concern lines those reviews already wrote.
+
+    This is the closest the weekly summary comes to saying anything about how
+    somebody *is*, which is why it stays a count of impressions rather than
+    becoming one. Two "flat" days is a fact about two conversations; it is not
+    a finding about a person, and nothing here may be read as one.
+    """
+
+    conversations: int = 0
+    reviewed: int = 0
+    moods: dict[str, int] = Field(default_factory=dict)
+    themes: list[str] = Field(default_factory=list, max_length=5)
+
+
 class CareFacts(StrictModel):
     """Everything the backend counted, and nothing it inferred."""
 
@@ -105,6 +124,7 @@ class CareFacts(StrictModel):
     devices: DeviceFacts = Field(default_factory=DeviceFacts)
     upcoming_appointments: list[AppointmentFact] = Field(default_factory=list)
     family_activity: FamilyActivityFacts = Field(default_factory=FamilyActivityFacts)
+    conversation: ConversationFacts = Field(default_factory=ConversationFacts)
     # Set when the figures rest on thin or stale data. Shown wherever the
     # summary is shown, never paraphrased away by the model.
     data_freshness_warning: str | None = None
@@ -130,6 +150,60 @@ class WeeklySummaryOut(StrictModel):
     highlights: list[str] = Field(default_factory=list, max_length=6)
 
 
+class RememberedFact(StrictModel):
+    """One thing worth carrying into the next conversation."""
+
+    kind: Literal["person", "preference", "routine", "interest", "event"]
+    content: str = Field(min_length=1, max_length=300)
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
+class SuggestedReminder(StrictModel):
+    """An everyday routine that came up, for the family to accept or ignore."""
+
+    title: str = Field(min_length=1, max_length=120)
+    local_time: str = Field(pattern=r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
+    because: str = Field(min_length=1, max_length=200)
+
+
+class ConversationReviewOut(StrictModel):
+    """What the model may conclude from one finished conversation.
+
+    Note what is absent, and why:
+
+    * No diagnosis, no symptom list, no severity, no risk score. Somebody
+      sounding tired is not a clinical finding and this schema will not let it
+      be recorded as one.
+    * No ``raise_alert``. A quiet worry and an emergency must not be able to
+      look alike, and only a person can raise one.
+    * No free-form action. The only thing it can propose is an everyday
+      reminder, and even that is a suggestion the family sees rather than
+      something that happens.
+
+    ``notify_family`` is a request, not a decision: the handler still applies
+    its own rules, and the persona requires Gamira to have said so to the
+    person first — she is not there to report on them behind their back.
+    """
+
+    schema_version: Literal["1"] = "1"
+    # How the conversation sounded, in one ordinary word. Not a measurement.
+    mood: Literal[
+        "cheerful", "content", "flat", "lonely", "anxious", "unwell", "unclear"
+    ] = "unclear"
+    # One or two plain sentences a family member could read without alarm.
+    summary: str = Field(default="", max_length=600)
+    concerns: list[str] = Field(default_factory=list, max_length=3)
+    memories: list[RememberedFact] = Field(default_factory=list, max_length=5)
+    suggested_reminders: list[SuggestedReminder] = Field(
+        default_factory=list, max_length=2
+    )
+    notify_family: bool = False
+    family_message: str = Field(default="", max_length=300)
+    # Whether Gamira said in the conversation that she would mention it. When
+    # she did not, the handler will not send anything.
+    told_them: bool = False
+
+
 class ChatReplyOut(StrictModel):
     schema_version: Literal["1"] = "1"
     reply: str = Field(min_length=1, max_length=2000)
@@ -144,12 +218,16 @@ __all__ = [
     "AppointmentFact",
     "CareFacts",
     "ChatReplyOut",
+    "ConversationFacts",
+    "ConversationReviewOut",
     "DeviceFacts",
     "DoseFacts",
     "FamilyActivityFacts",
     "HealthFacts",
     "MetricFreshness",
+    "RememberedFact",
     "ReminderFacts",
     "StrictModel",
+    "SuggestedReminder",
     "WeeklySummaryOut",
 ]

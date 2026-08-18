@@ -1,31 +1,8 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import { Phone, ShieldAlert } from "lucide-react";
-
-/** Two short tones. Synthesised so the alert needs no asset to load. */
-function beep() {
-  try {
-    const Ctor = window.AudioContext || window.webkitAudioContext;
-    if (!Ctor) return;
-    const ctx = new Ctor();
-    [0, 0.35].forEach((offset) => {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = "sine";
-      osc.frequency.value = 880;
-      gain.gain.setValueAtTime(0.0001, ctx.currentTime + offset);
-      gain.gain.exponentialRampToValueAtTime(0.25, ctx.currentTime + offset + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + offset + 0.25);
-      osc.connect(gain).connect(ctx.destination);
-      osc.start(ctx.currentTime + offset);
-      osc.stop(ctx.currentTime + offset + 0.3);
-    });
-    setTimeout(() => ctx.close(), 1500);
-  } catch {
-    // Autoplay policy, no audio device — the visual alert stands on its own.
-  }
-}
+import { alarmAudible, startAlarm, stopAlarm } from "@/lib/alarm";
 
 function timeAgo(value) {
   const at = new Date(value);
@@ -48,13 +25,14 @@ export default function SosAlertOverlay({ alerts = [], onAcknowledge }) {
   const navigate = useNavigate();
   const acknowledge = (id) => onAcknowledge?.(id);
   const alert = alerts[0] || null;
-  const announced = useRef(null);
 
+  // Sound for as long as there is an unanswered emergency on screen, not once
+  // when it arrives. Somebody who was out of the room when it landed still
+  // needs to hear it when they come back.
   useEffect(() => {
-    if (alert && announced.current !== alert.id) {
-      announced.current = alert.id;
-      beep();
-    }
+    if (!alert) return undefined;
+    startAlarm();
+    return stopAlarm;
   }, [alert]);
 
   return (
@@ -102,6 +80,16 @@ export default function SosAlertOverlay({ alerts = [], onAcknowledge }) {
             {alerts.length > 1 && (
               <p className="mt-3 text-[12px] font-semibold text-destructive">
                 {alerts.length - 1} more alert{alerts.length > 2 ? "s" : ""} waiting
+              </p>
+            )}
+
+            {!alarmAudible() && (
+              /* The browser will not let a page make a sound before anybody has
+                 touched it. Say so, rather than leaving somebody to assume an
+                 emergency would always be audible. */
+              <p className="mt-3 text-[12px] text-muted-foreground">
+                This alert is silent — tap anywhere in Gamira once so it can make
+                a sound next time.
               </p>
             )}
 

@@ -61,6 +61,15 @@ class Reminder(UUIDPrimaryKey, Timestamps, Base):
     )
     last_completed_at: Mapped[dt.datetime | None] = mapped_column(UtcDateTime())
     created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    # Why Gamira thought of this, in her words, shown wherever the suggestion
+    # is shown. A suggestion a family cannot see the reason for is a suggestion
+    # they can only guess at, and guessing is not consent.
+    suggestion_reason: Mapped[str | None] = mapped_column(String(200))
+    # Which conversation it came out of, so the reason can be checked against
+    # what was actually said rather than taken on trust.
+    suggested_from_conversation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("conversations.id", ondelete="SET NULL")
+    )
 
 
 class TimelineEvent(UUIDPrimaryKey, Timestamps, Base):

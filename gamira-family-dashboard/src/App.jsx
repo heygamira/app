@@ -17,6 +17,8 @@ import Family from '@/pages/Family';
 import More from '@/pages/More';
 import AISummary from '@/pages/AISummary';
 import AIAssistant from '@/pages/AIAssistant';
+import GamiraMemory from "@/pages/GamiraMemory";
+import GamiraNoticed from "@/pages/GamiraNoticed";
 import AddReminder from '@/pages/AddReminder';
 import AddMember from '@/pages/AddMember';
 import MemberProfile from '@/pages/MemberProfile';
@@ -51,6 +53,8 @@ const AppRoutes = () => (
         <Route path="/more" element={<More />} />
         <Route path="/ai-summary" element={<AISummary />} />
         <Route path="/ai-assistant" element={<AIAssistant />} />
+        <Route path="/gamira-memory" element={<GamiraMemory />} />
+        <Route path="/gamira-noticed" element={<GamiraNoticed />} />
         <Route path="/add-reminder" element={<AddReminder />} />
         <Route path="/add-member" element={<AddMember />} />
         <Route path="/member/:id" element={<MemberProfile />} />

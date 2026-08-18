@@ -13,7 +13,7 @@ from app.core.logging import current_request_id
 from app.db.base import utcnow
 from app.models.audit import AuditLog
 from app.models.care import TimelineEvent
-from app.models.enums import TimelineEventType
+from app.models.enums import ActorType, TimelineEventType
 
 
 async def record_timeline_event(
@@ -67,6 +67,7 @@ async def record_audit(
     *,
     action: str,
     actor_user_id: uuid.UUID | None,
+    actor_type: ActorType = ActorType.USER,
     target_type: str | None = None,
     target_id: uuid.UUID | None = None,
     family_id: uuid.UUID | None = None,
@@ -77,9 +78,15 @@ async def record_audit(
 
     Callers pass only non-sensitive metadata: never tokens, invitation secrets
     or full health values.
+
+    ``actor_type`` defaults to ``user`` because almost everything is, but it is
+    not decoration: ``docs/AI_SAFETY.md`` promises that an AI-originated action
+    is always distinguishable in the audit trail, and a column nobody ever sets
+    keeps that promise only by accident.
     """
     entry = AuditLog(
         actor_user_id=actor_user_id,
+        actor_type=actor_type.value,
         action=action,
         target_type=target_type,
         target_id=target_id,

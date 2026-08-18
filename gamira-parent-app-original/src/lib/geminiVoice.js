@@ -32,6 +32,14 @@ export const DEFAULT_USAGE_URL =
 
 const OUTPUT_RATE = 24_000;
 
+// How far ahead of the clock to (re)start playback after a gap. Enough for the
+// audio thread to render a buffer comfortably, short enough that nobody hears
+// it as delay.
+const PLAYBACK_LEAD = 0.12;
+// Below this much scheduled runway, treat the stream as having run dry and
+// rebuild the cushion rather than chasing the clock.
+const MIN_SLACK = 0.02;
+
 // Runs on the audio thread: batches mic samples and converts float -> PCM16.
 // Delivered as a blob URL so it needs no separate file in the build.
 //
@@ -146,9 +154,17 @@ export function extractFunctionCalls(message) {
  * @param {object} opts
  * @param {((opts: {provisional: boolean}) => Promise<object>) | null} [opts.createSession]
  *        asks the backend for a session + token
+ * @param {((sessionId: string) => void) | null} [opts.closeSession]
+ *        releases the backend's record of this session. Called exactly once,
+ *        however the session ended.
+ * @param {((sessionId: string, turns: Array<{role: string, text: string}>,
+ *          opts: {final: boolean}) => void) | null} [opts.storeTranscript]
+ *        keeps what was said. Batched every few seconds and once on the way out.
  * @param {(sessionId: string, calls: Array<object>) => Promise<object>} [opts.sendToolCalls]
  * @param {(name: string, args: object) => Promise<object>} [opts.dispatchClientTool]
  * @param {(request: object) => void} [opts.onConfirmationRequired]
+ * @param {(resolved: {decisionId: string, response: object}) => void} [opts.onConfirmationResolved]
+ *        a confirmation was answered out loud rather than on screen
  * @param {string} [opts.usageUrl]
  * @param {(s: string) => void} [opts.onStatus]      'connecting'|'listening'|'speaking'|'working'|'closed'
  * @param {(t: string) => void} [opts.onTranscript]  model transcript text, streamed
@@ -171,9 +187,12 @@ export function extractFunctionCalls(message) {
  */
 export function startVoiceSession({
   createSession = null,
+  closeSession = null,
+  storeTranscript = null,
   sendToolCalls = null,
   dispatchClientTool = null,
   onConfirmationRequired = () => {},
+  onConfirmationResolved = () => {},
   usageUrl = DEFAULT_USAGE_URL,
   onStatus = () => {},
   onTranscript = () => {},
@@ -199,6 +218,7 @@ export function startVoiceSession({
   let workletNode = null;
   let sinkNode = null;
   let backendSessionId = null;
+  let released = false;
   let unsubscribeAudio = null;
 
   // What this session built and must therefore tear down. Anything borrowed
@@ -217,6 +237,12 @@ export function startVoiceSession({
   // Scheduled playback buffers, so an interrupt can cut them off mid-flight.
   let queued = [];
   let playHead = 0;
+  // Whether the model is mid-utterance, so "speaking" is announced once per
+  // turn instead of once per audio chunk.
+  let speaking = false;
+  // How many times playback ran dry. Surfaced on the handle so a stuttering
+  // connection is measurable rather than a matter of opinion.
+  let underruns = 0;
   let opened = false; // did the socket ever reach a usable state?
 
   // Tool-call bookkeeping.
@@ -225,14 +251,24 @@ export function startVoiceSession({
   // twice if the SDK delivers a message more than once. The backend has its own
   // idempotency key for the same reason; this one just avoids the round trip.
   const handledCallIds = new Set();
-  // Calls waiting on a person to confirm, keyed by decision id. The mic stays
-  // muted while any of these are open: the model must not talk itself into a
-  // second attempt while a dialog is on screen.
+  // Calls waiting on a person to confirm, keyed by decision id — so a tapped
+  // answer can find the call it belongs to, and so the dialog can be closed
+  // when the answer arrives some other way.
   const awaitingConfirmation = new Map();
   let toolsInFlight = 0;
 
-  const micLive = () =>
-    !stopped && toolsInFlight === 0 && awaitingConfirmation.size === 0;
+  // The microphone stops feeding the model while a tool call is resolving, and
+  // only then.
+  //
+  // It used to stop for an open confirmation too, which made a spoken answer
+  // impossible: the person said "yes" into a muted microphone and the
+  // conversation sat there until somebody touched the screen. That is the
+  // wrong trade for a voice companion, and worst for the person least able to
+  // reach the phone. What the mute was really protecting against — the model
+  // hearing the room, taking another turn and proposing the same thing twice —
+  // is handled where it belongs now: the backend returns the confirmation
+  // already open rather than raising a second one.
+  const micLive = () => !stopped && toolsInFlight === 0;
 
   const stopQueued = () => {
     queued.forEach((node) => {
@@ -240,9 +276,33 @@ export function startVoiceSession({
     });
     queued = [];
     playHead = 0;
+    speaking = false;
+  };
+
+  /**
+   * Tell the backend this session is over. Once, however it ended.
+   *
+   * This has to live here rather than in the caller. A session can end three
+   * ways — stopped by hand, closed by the far end, or failed — and only the
+   * first was ever released, so the other two left a row holding one of the
+   * two concurrent slots for its full half-hour lifetime. That was survivable
+   * while a session could only begin with a button press. A wake word can start
+   * them all day, and two leaked rows lock the microphone out completely.
+   */
+  const release = () => {
+    if (released || !backendSessionId) return;
+    released = true;
+    try {
+      closeSession?.(backendSessionId);
+    } catch {
+      // The row expires on its own; a failed release is not worth surfacing.
+    }
   };
 
   const cleanup = () => {
+    // Before `stopped`, or the flush refuses to run — and this is the flush
+    // that carries the end of the conversation.
+    flushTranscript({ final: true });
     stopped = true;
     try { session?.close(); } catch { /* already gone */ }
     session = null;
@@ -259,6 +319,7 @@ export function startVoiceSession({
     if (owned.playbackCtx) { try { playbackCtx?.close(); } catch { /* ignore */ } }
     if (workletUrl) URL.revokeObjectURL(workletUrl);
     workletUrl = null;
+    release();
   };
 
   const fail = (err) => {
@@ -361,15 +422,35 @@ export function startVoiceSession({
     node.buffer = buffer;
     node.connect(playbackCtx.destination);
 
-    // Butt each chunk against the previous one; if we have fallen behind,
-    // restart from now rather than scheduling in the past.
-    const startAt = Math.max(playbackCtx.currentTime, playHead);
-    node.start(startAt);
-    playHead = startAt + buffer.duration;
+    // Each chunk is butted against the previous one. The only question is what
+    // to do when there is nothing left scheduled ahead of the clock, which
+    // happens at the start of every turn and again whenever the network
+    // stutters.
+    //
+    // Starting at `currentTime` is the obvious answer and the wrong one: it
+    // asks the audio thread to render a buffer that is already due, so the
+    // start of the reply crackles, and every subsequent hiccup snaps the
+    // schedule back to "now" and crackles again. Over a bursty connection that
+    // is continuous jitter rather than an occasional glitch.
+    //
+    // Instead, rebuild a small cushion. PLAYBACK_LEAD of latency is inaudible
+    // in a conversation; the dropouts it prevents are not.
+    if (playHead < playbackCtx.currentTime + MIN_SLACK) {
+      playHead = playbackCtx.currentTime + PLAYBACK_LEAD;
+      underruns += 1;
+    }
+    node.start(playHead);
+    playHead += buffer.duration;
 
     queued.push(node);
     node.onended = () => { queued = queued.filter((n) => n !== node); };
-    onStatus('speaking');
+    // Only on the transition. Gemini sends audio in small, frequent chunks, and
+    // announcing "speaking" on every one of them puts a state update between
+    // the scheduler and the buffer it is trying to queue.
+    if (!speaking) {
+      speaking = true;
+      onStatus('speaking');
+    }
   };
 
   /**
@@ -390,6 +471,32 @@ export function startVoiceSession({
       // mid-conversation, and the model will simply ask again.
       // eslint-disable-next-line no-console
       console.warn('Gamira voice: could not send a tool response', err);
+    }
+  };
+
+  /**
+   * Tell the model something that happened outside the conversation.
+   *
+   * Only used for one thing: a confirmation answered by tapping the screen
+   * rather than out loud. The model cannot hear a button, and its function
+   * response for that call has already gone (it said a confirmation was open),
+   * so there is no question left to answer — this is the outcome arriving by
+   * the only other route there is.
+   *
+   * Bracketed, and phrased about them rather than as them, because it is not
+   * something they said. It never reaches the stored transcript either: that
+   * is built from what the microphone heard.
+   */
+  const notify = (text) => {
+    if (stopped || !session) return;
+    try {
+      session.sendClientContent({
+        turns: [{ role: 'user', parts: [{ text }] }],
+        turnComplete: true,
+      });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn('Gamira voice: could not pass on a screen answer', err);
     }
   };
 
@@ -470,15 +577,26 @@ export function startVoiceSession({
           name: result.name,
         };
         if (result.requires_confirmation && result.decision_id) {
-          // Held back: the response goes to the model only once a person has
-          // answered, so it can never say something happened before it did.
           awaitingConfirmation.set(result.decision_id, call);
           onConfirmationRequired({
             decisionId: result.decision_id,
             prompt: result.confirmation_prompt,
             toolName: call.name,
           });
+          // The response goes out now, not when somebody taps. It says
+          // `confirmation_required` and carries the exact sentence to read and
+          // the id to answer against — nothing that could be mistaken for the
+          // action having happened. Withholding it left the model waiting on an
+          // answer that never came, so it could not react to anything at all,
+          // including the person saying yes.
+          sendToolResponse(call, result.response);
           continue;
+        }
+        // An answer to a confirmation, spoken rather than tapped. The dialog on
+        // screen is about a decision that is now settled, so it goes.
+        const resolved = result.response?.resolved_decision_id;
+        if (resolved && awaitingConfirmation.delete(resolved)) {
+          onConfirmationResolved({ decisionId: resolved, response: result.response });
         }
         sendToolResponse(call, result.response);
       }
@@ -499,6 +617,44 @@ export function startVoiceSession({
   };
 
   let inputRate = 16_000;
+
+  // Transcript, batched. Both sides arrive a few words at a time, and a request
+  // per fragment would put dozens of round trips alongside the audio path this
+  // file spends its effort keeping clear.
+  let pendingTurns = [];
+  let transcriptTimer = null;
+
+  const flushTranscript = ({ final = false } = {}) => {
+    if (transcriptTimer) {
+      clearTimeout(transcriptTimer);
+      transcriptTimer = null;
+    }
+    if (!pendingTurns.length || !backendSessionId || !storeTranscript) return;
+    // Consecutive fragments from the same speaker are one thing said, and are
+    // joined here rather than stored as a row per syllable.
+    const turns = [];
+    for (const turn of pendingTurns) {
+      const last = turns[turns.length - 1];
+      if (last && last.role === turn.role) last.text += turn.text;
+      else turns.push({ ...turn });
+    }
+    pendingTurns = [];
+    const cleaned = turns
+      .map((turn) => ({ role: turn.role, text: turn.text.trim() }))
+      .filter((turn) => turn.text);
+    if (!cleaned.length) return;
+    try {
+      storeTranscript(backendSessionId, cleaned, { final });
+    } catch {
+      // A lost transcript must never disturb the conversation producing it.
+    }
+  };
+
+  const recordTurn = (role, text) => {
+    if (stopped || !text) return;
+    pendingTurns.push({ role, text });
+    if (!transcriptTimer) transcriptTimer = setTimeout(flushTranscript, 4000);
+  };
 
   const handle = {
     stop() {
@@ -538,17 +694,27 @@ export function startVoiceSession({
 
     get streaming() { return streaming; },
 
+    /** Playback health: how many times the audio stream ran dry. */
+    get underruns() { return underruns; },
+
     /**
-     * A person answered a confirmation. Send the outcome to the model.
+     * A person answered a confirmation *on the screen*. Tell the model.
      *
-     * Called with whatever the backend returned from confirm or reject, so the
-     * model is told the *persisted* result — never an optimistic one.
+     * Called with whatever the backend returned from confirm or reject, so what
+     * the model hears is the persisted result — never an optimistic one.
+     *
+     * Answering out loud does not come through here: that path is a real tool
+     * call, `confirm_pending_action`, and it gets a real function response.
      */
     resolveConfirmation(decisionId, response) {
       const call = awaitingConfirmation.get(decisionId);
-      if (!call) return;
+      if (!call) return; // already answered, most likely out loud
       awaitingConfirmation.delete(decisionId);
-      sendToolResponse(call, response);
+      notify(
+        response?.status === 'ok'
+          ? `[They answered on the screen: yes. ${response.message || 'It is done.'}]`
+          : '[They answered on the screen: no. Nothing was changed.]'
+      );
       if (micLive()) onStatus('listening');
     },
 
@@ -577,7 +743,14 @@ export function startVoiceSession({
         throw new Error('Gamira could not start a voice session just now.');
       }
       onSession(created);
-      if (stopped) return;
+      if (stopped) {
+        // Abandoned while the backend was still answering. The row exists now
+        // even though nothing will ever use it — a speculative session that is
+        // dropped after two seconds hits this every time the round trip is
+        // slower than that.
+        release();
+        return;
+      }
 
       // Borrowed where the wake-word engine already opened one. That removes
       // the permission check, the device open and two context resumes from the
@@ -667,8 +840,15 @@ export function startVoiceSession({
             }
             if (content.outputTranscription?.text) {
               onTranscript(content.outputTranscription.text);
+              recordTurn('assistant', content.outputTranscription.text);
+            }
+            // The person's own words. Nothing transcribed these before, so a
+            // conversation left no trace of the half that mattered most.
+            if (content.inputTranscription?.text) {
+              recordTurn('user', content.inputTranscription.text);
             }
             if (content.turnComplete) {
+              speaking = false;
               onTurnEnd();
               if (micLive()) onStatus('listening');
             }

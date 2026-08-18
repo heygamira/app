@@ -22,7 +22,13 @@ from typing import Any, Protocol, TypeVar
 from pydantic import BaseModel, ValidationError
 
 from app.ai.prompts import Prompt
-from app.ai.schemas import ChatReplyOut, WeeklySummaryOut
+from app.ai.schemas import (
+    ChatReplyOut,
+    ConversationReviewOut,
+    RememberedFact,
+    SuggestedReminder,
+    WeeklySummaryOut,
+)
 from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
 
@@ -190,6 +196,54 @@ def _fake_output(output_model: type[BaseModel], rendered: str) -> BaseModel:
                 f"Doses missed: {missed}",
             ],
         )
+    if output_model is ConversationReviewOut:
+        # Composed from the transcript rather than canned, so a test asserting
+        # "the review noticed they sounded lonely" is asserting that the words
+        # reached the model at all. The trigger words are crude on purpose:
+        # this is a stand-in for a model, not an attempt to be one.
+        spoken = rendered.lower()
+        lonely = any(
+            word in spoken for word in ("lonely", "alone", "miss ", "nobody", "quiet")
+        )
+        # A routine that came up in passing. Crude on purpose: this stands in
+        # for a model, it does not try to be one — but it does have to exercise
+        # the suggestion path, which writes real rows.
+        plants = "plant" in spoken
+        return ConversationReviewOut(
+            mood="lonely" if lonely else "content",
+            summary="A short conversation about their day.",
+            concerns=["They said they had been on their own a lot."] if lonely else [],
+            memories=(
+                [
+                    RememberedFact(
+                        kind="routine",
+                        content="They keep plants and water them themselves.",
+                        confidence=0.6,
+                    )
+                ]
+                if plants
+                else []
+            ),
+            suggested_reminders=(
+                [
+                    SuggestedReminder(
+                        title="Water the plants",
+                        local_time="17:00",
+                        because="They mentioned the plants have been dry.",
+                    )
+                ]
+                if plants
+                else []
+            ),
+            # Only ever asks when Gamira said she would — the same condition
+            # the handler enforces, so the fake cannot exercise a path the real
+            # one forbids.
+            notify_family=lonely and "i'll let" in spoken,
+            family_message=(
+                "They sounded like they would enjoy a call." if lonely else ""
+            ),
+            told_them="i'll let" in spoken,
+        )
     if output_model is ChatReplyOut:
         return ChatReplyOut(
             reply=(
@@ -218,6 +272,67 @@ def _extract_json_block(rendered: str) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # Gemini provider
 # --------------------------------------------------------------------------- #
+
+
+#: Fields the backend owns and a model must never be asked to produce. Told to
+#: emit a field whose schema says ``const: "1"``, Gemini returns ``"1.0"``,
+#: which then fails validation against ``Literal["1"]`` — a non-retryable
+#: failure caused entirely by asking for something that was never the model's
+#: to decide. The value comes from the Pydantic default instead.
+_BACKEND_OWNED_FIELDS = frozenset({"schema_version"})
+
+
+def _response_schema(output_model: type[BaseModel]) -> dict[str, Any]:
+    """The JSON Schema to send to Gemini for this output type.
+
+    Two departures from Pydantic's own schema, both learned from the API rather
+    than the documentation:
+
+    * ``additionalProperties`` is rejected outright — a 400 from
+      ``generate_content``, exactly as it is a 400 from the Live setup for tool
+      declarations (see ``app/ai/live.py::_declaration``). ``StrictModel`` sets
+      it on every output type, so every call carried it.
+    * Backend-owned fields are removed, for the reason above.
+
+    Strictness is not weakened by either: the reply is validated against the
+    full Pydantic model afterwards, and that validation is what is
+    authoritative. This only changes what the model is *told* to produce.
+    """
+
+    def prune(node: Any) -> Any:
+        if isinstance(node, dict):
+            return {
+                key: prune(value)
+                for key, value in node.items()
+                if key != "additionalProperties"
+            }
+        if isinstance(node, list):
+            return [prune(item) for item in node]
+        return node
+
+    schema = prune(output_model.model_json_schema())
+    properties = schema.get("properties")
+    if isinstance(properties, dict):
+        for name in _BACKEND_OWNED_FIELDS:
+            properties.pop(name, None)
+        required = schema.get("required")
+        if isinstance(required, list):
+            schema["required"] = [r for r in required if r not in _BACKEND_OWNED_FIELDS]
+    return schema
+
+
+def _is_retryable_api_error(exc: Exception) -> bool:
+    """Whether asking again could plausibly give a different answer.
+
+    A rejected request is not an outage. Treating a 400 as one costs three
+    attempts and reports "the model could not be reached", which is how a
+    malformed schema can sit in a codebase looking like a flaky provider. Only
+    rate limiting and server-side faults are worth another go.
+    """
+    status = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    if not isinstance(status, int):
+        return True  # transport-level failure with no status: worth retrying
+    return status == 429 or status >= 500
 
 
 class GeminiProvider:
@@ -256,11 +371,21 @@ class GeminiProvider:
         from google.genai import types
 
         started = time.perf_counter()
+        schema = _response_schema(output_model)
+        # `response_json_schema` takes a raw JSON Schema. `response_schema` takes
+        # the SDK's own Schema type, which has no `additionalProperties` field —
+        # the same distinction `app/ai/live.py::_declaration` documents for tool
+        # declarations. The fallback keeps working if a future SDK drops it.
+        schema_field = (
+            "response_json_schema"
+            if "response_json_schema" in types.GenerateContentConfig.model_fields
+            else "response_schema"
+        )
         config = types.GenerateContentConfig(
             system_instruction=prompt.system,
             response_mime_type="application/json",
-            response_schema=output_model,
             temperature=0.2,
+            **{schema_field: schema},
         )
         try:
             response = await asyncio.wait_for(
@@ -274,11 +399,23 @@ class GeminiProvider:
         except Exception as exc:
             # The exception text can echo the prompt, so only the type is
             # logged and only a code is raised.
+            retryable = _is_retryable_api_error(exc)
             logger.warning(
                 "gemini_call_failed",
-                extra={"error": type(exc).__name__, "prompt": prompt.id},
+                extra={
+                    "error": type(exc).__name__,
+                    "status": getattr(exc, "code", None),
+                    "prompt": prompt.id,
+                    "model": self.model,
+                    "retryable": retryable,
+                },
             )
-            raise AIUnavailable("The model could not be reached.") from exc
+            if retryable:
+                raise AIUnavailable("The model could not be reached.") from exc
+            # A rejected request will be rejected identically three times over.
+            # Failing here says so, instead of reporting an outage that is not
+            # happening.
+            raise AIRefused("The model rejected the request.") from exc
 
         latency = (time.perf_counter() - started) * 1000
         text = getattr(response, "text", None)

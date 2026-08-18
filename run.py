@@ -1744,6 +1744,91 @@ class Console:
                 "rows": [[_cell(row[column]) for column in columns] for row in found],
             }
 
+    def conversations(self, limit: int = 12) -> dict:
+        """What was actually said, grouped by conversation.
+
+        The point of the console is watching the thing work, and until now the
+        one thing it could not show was the conversation itself — only the
+        requests around it. Read-only, like every other database view here.
+        """
+        try:
+            with read_only_db() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT c.id            AS conversation_id,
+                           c.channel       AS channel,
+                           c.started_at    AS started_at,
+                           c.ended_at      AS ended_at,
+                           s.preferred_name AS senior_name,
+                           m.role          AS role,
+                           m.content       AS content,
+                           m.model         AS model,
+                           m.created_at    AS created_at
+                      FROM conversation_messages m
+                      JOIN conversations c ON c.id = m.conversation_id
+                      LEFT JOIN senior_profiles s ON s.id = c.senior_profile_id
+                     ORDER BY c.started_at DESC, m.created_at ASC
+                     LIMIT 2000
+                    """
+                ).fetchall()
+                # What Gamira made of each one afterwards: the background
+                # review, written as an `ai_summaries` row against the
+                # conversation. This is the "thinking" half of the same screen —
+                # what was said, and then what she concluded from it — and
+                # having to look in two places to see both was the reason the
+                # console was hard to follow.
+                reviews = connection.execute(
+                    """
+                    SELECT conversation_id, content, model, prompt_version,
+                           generated_at
+                      FROM ai_summaries
+                     WHERE kind = 'CONVERSATION'
+                       AND conversation_id IS NOT NULL
+                     ORDER BY generated_at DESC
+                     LIMIT 500
+                    """
+                ).fetchall()
+        except (sqlite3.Error, FileNotFoundError) as error:
+            return {"conversations": [], "error": str(error)}
+
+        reviewed = {
+            str(row["conversation_id"]): {
+                "content": row["content"] or "",
+                "model": row["model"] or "",
+                "prompt_version": row["prompt_version"] or "",
+                "at": _cell(row["generated_at"]),
+            }
+            for row in reviews
+        }
+
+        grouped: dict[str, dict] = {}
+        for row in rows:
+            key = str(row["conversation_id"])
+            conversation = grouped.setdefault(
+                key,
+                {
+                    "id": key,
+                    "channel": row["channel"],
+                    "senior_name": row["senior_name"] or "",
+                    "started_at": _cell(row["started_at"]),
+                    "ended_at": _cell(row["ended_at"]),
+                    "review": reviewed.get(key),
+                    "turns": [],
+                },
+            )
+            conversation["turns"].append(
+                {
+                    "role": (row["role"] or "").lower(),
+                    "text": row["content"] or "",
+                    "at": _cell(row["created_at"]),
+                    "model": row["model"] or "",
+                }
+            )
+        ordered = sorted(
+            grouped.values(), key=lambda item: item["started_at"] or "", reverse=True
+        )
+        return {"conversations": ordered[:limit]}
+
     def query(self, sql: str) -> dict:
         if not SAFE_QUERY.match(sql or ""):
             raise ValueError("Only SELECT statements are allowed here.")
@@ -1856,6 +1941,11 @@ def console_handler(console: Console):
                     self._json(200, console.voice_config())
                 elif path == "/api/cost":
                     self._json(200, console.cost())
+                elif path == "/api/conversations":
+                    if not self._local():
+                        self._json(403, {"error": "Conversations are local-only."})
+                        return
+                    self._json(200, console.conversations())
                 elif path == "/api/db/tables":
                     self._json(200, {"tables": console.tables()})
                 elif path == "/api/db/rows":

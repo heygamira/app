@@ -11,6 +11,7 @@ output, and echoing it back is how a prompt injection gets a second chance.
 
 from __future__ import annotations
 
+import re
 import uuid
 from typing import Any
 
@@ -78,6 +79,11 @@ def _validate_value(field: str, spec: dict[str, Any], value: Any) -> Any:
             raise ArgumentError(field, "too_short")
         if len(value) > maximum:
             raise ArgumentError(field, "too_long")
+        # Checked after the length bounds, so a pathological string is rejected
+        # for its size before any regex runs over it.
+        pattern = spec.get("pattern")
+        if pattern is not None and re.fullmatch(pattern, value) is None:
+            raise ArgumentError(field, "bad_format")
         return value
 
     if expected == "boolean":

@@ -253,6 +253,37 @@
       .steps li.done .mark { color: var(--accent); }
       #shutdown { flex: none; }
       .svc .dot.stale { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
+
+      /* Conversation turns. Deliberately plain: this is a development window,
+         and what matters is reading who said what quickly. */
+      .turn {
+        display: grid;
+        grid-template-columns: 68px 1fr;
+        gap: 10px;
+        padding: 4px 0;
+        border-top: 1px solid var(--line, #222);
+        font-size: 12px;
+        line-height: 1.45;
+      }
+      .turn b { font-weight: 600; opacity: 0.65; }
+      .turn.them b { color: #7dd3fc; }
+      .turn.gamira b { color: #86efac; }
+      .turn span { white-space: pre-wrap; word-break: break-word; }
+      /* What the background review concluded, under the exchange that produced
+         it. Set apart rather than styled as another turn: nobody said it. */
+      .review {
+        display: grid;
+        grid-template-columns: 68px 1fr;
+        gap: 10px;
+        margin-top: 8px;
+        padding-top: 8px;
+        border-top: 1px dashed var(--line, #222);
+        font-size: 12px;
+        line-height: 1.45;
+      }
+      .review b { font-weight: 600; color: #fcd34d; opacity: 0.8; }
+      .review span { white-space: pre-wrap; word-break: break-word; }
+      .review .note { grid-column: 2; }
     </style>
   </head>
   <body>
@@ -276,6 +307,7 @@
 
     <nav>
       <button class="on" data-tab="logs">Logs</button>
+      <button data-tab="talk">Conversation</button>
       <button data-tab="requests">Requests<span class="count" id="req-count"></span></button>
       <button data-tab="voice">Voice</button>
       <button data-tab="cost">Cost<span class="count" id="cost-count"></span></button>
@@ -306,6 +338,18 @@
           <button class="action" id="save">Save</button>
         </div>
         <div class="bar">
+          <!-- Named views. Each one sets the filters below rather than
+               replacing them, so "show me the conversation" is one click and
+               everything the old chip wall could do is still reachable. -->
+          <span class="chip on" data-view="all">Everything</span>
+          <span class="chip" data-view="talk">Conversation</span>
+          <span class="chip" data-view="think">Gamira&rsquo;s thinking</span>
+          <span class="chip" data-view="care">Care actions</span>
+          <span class="chip" data-view="errors">Errors</span>
+          <span class="sep"></span>
+          <button class="action" id="more-filters">More filters</button>
+        </div>
+        <div class="bar" id="filter-bar" style="display: none">
           <span id="kinds" style="display: contents"></span>
           <span class="sep"></span>
           <span id="tags" style="display: contents"></span>
@@ -321,6 +365,17 @@
         </div>
         <div id="log"></div>
         <div class="note" id="counts"></div>
+      </section>
+
+      <!-- ---------------------------------------------------------------- -->
+      <section class="tab" id="tab-talk">
+        <div class="bar">
+          <span class="note">
+            What was said, both sides, newest conversation first. Voice sessions
+            appear once the transcript reaches the backend.
+          </span>
+        </div>
+        <div id="talk-list"></div>
       </section>
 
       <!-- ---------------------------------------------------------------- -->
@@ -640,8 +695,42 @@
           if (button.dataset.tab === "voice") loadVoice();
           if (button.dataset.tab === "cost") loadCost();
           if (button.dataset.tab === "health") loadHealth();
+          if (button.dataset.tab === "talk") loadTalk();
         };
       });
+
+      // -- views ------------------------------------------------------------ //
+      //
+      // Thirty-odd chips answered "which of these switches do I want?" when the
+      // real question is "what am I trying to watch?". Each view is a saved
+      // answer that writes into the same search box everything else already
+      // reads — so the advanced filters are unchanged, just folded away.
+
+      const VIEWS = {
+        all: "",
+        talk: "/live|transcript|conversation|voice|tool_call/",
+        think: "/ai\.|decision|summary|policy|prompt|gemini/",
+        care: "/dose|reminder|medication|sos|alert/",
+        errors: "/error|failed|refused|denied|exception|traceback/",
+      };
+
+      document.querySelectorAll("[data-view]").forEach((chip) => {
+        chip.onclick = () => {
+          document
+            .querySelectorAll("[data-view]")
+            .forEach((c) => c.classList.remove("on"));
+          chip.classList.add("on");
+          $("search").value = VIEWS[chip.dataset.view] || "";
+          $("search").dispatchEvent(new Event("input"));
+        };
+      });
+
+      $("more-filters").onclick = () => {
+        const bar = $("filter-bar");
+        const hidden = bar.style.display === "none";
+        bar.style.display = hidden ? "" : "none";
+        $("more-filters").classList.toggle("on", hidden);
+      };
 
       // -- log filters ------------------------------------------------------ //
 
@@ -1538,6 +1627,64 @@
         }
       }
 
+      // -- conversation ------------------------------------------------------- //
+      //
+      // The one thing this console could not show was the thing the product
+      // does. Requests around a voice session were visible; what was said was
+      // not, because nothing kept it.
+
+      async function loadTalk() {
+        const list = $("talk-list");
+        try {
+          const data = await (await fetch("/api/conversations")).json();
+          if (data.error) throw new Error(data.error);
+          if (!data.conversations.length) {
+            list.innerHTML =
+              '<p class="note">Nothing said yet. Talk to Gamira in the Parent App ' +
+              "and the conversation appears here.</p>";
+            return;
+          }
+          list.innerHTML = data.conversations
+            .map(
+              (conversation) => `
+                <div class="panel" style="margin-bottom:12px">
+                  <h3>
+                    ${escapeHtml(conversation.senior_name || "Someone")}
+                    <span class="note">
+                      ${escapeHtml(conversation.channel || "")} ·
+                      ${escapeHtml(String(conversation.started_at || "").slice(0, 19))} ·
+                      ${conversation.turns.length} turns
+                    </span>
+                  </h3>
+                  ${conversation.turns
+                    .map(
+                      (turn) => `
+                        <div class="turn ${turn.role === "user" ? "them" : "gamira"}">
+                          <b>${turn.role === "user" ? "Them" : "Gamira"}</b>
+                          <span>${escapeHtml(turn.text)}</span>
+                        </div>`
+                    )
+                    .join("")}
+                  ${
+                    conversation.review
+                      ? `<div class="review">
+                          <b>What Gamira made of it</b>
+                          <span>${escapeHtml(conversation.review.content)}</span>
+                          <span class="note">
+                            ${escapeHtml(conversation.review.model || "")}
+                            ${escapeHtml(conversation.review.prompt_version || "")}
+                          </span>
+                        </div>`
+                      : ""
+                  }
+                </div>`
+            )
+            .join("");
+        } catch (error) {
+          list.innerHTML = `<p class="note">${escapeHtml(error.message)}</p>`;
+        }
+      }
+
       // -- database ----------------------------------------------------------- //
 
       async function loadTables() {
@@ -1628,6 +1775,7 @@
           if (closing) return;
           if ($("tab-requests").classList.contains("on")) loadRequests();
           if ($("tab-cost").classList.contains("on")) loadCost();
+          if ($("tab-talk").classList.contains("on")) loadTalk();
         }, 3000)
       );
 

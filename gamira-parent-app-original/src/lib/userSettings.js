@@ -15,9 +15,19 @@ const defaults = {
     enabled: true,
     engine: 'auto',
     sensitivityOffset: 0,
-    chime: true,
+    // Which sound plays when Gamira hears its name. 'off' is silent.
+    sound: 'chime',
     preconnect: true,
   },
+  // A conversation nobody is having still streams the microphone and is still
+  // billed for it, so it closes itself after this long with no activity.
+  // 0 means never.
+  voiceSession: { autoStopSeconds: 60 },
+  // Whether Gamira may speak first when something has been waiting a while.
+  // On by default on purpose: a reminder that has to be discovered in Settings
+  // will not reach the person who most needs it. Speaking costs nothing and
+  // opens no microphone — see `lib/useProactive.js`.
+  proactive: { enabled: true },
   emergency: { primary: null, others: [], shareLocation: false },
   accessibility: { textSize: 'Standard', highContrast: false, reduceMotion: false, voiceAssistance: false },
 };

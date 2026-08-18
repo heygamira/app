@@ -26,15 +26,17 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai.persona import PERSONA_VERSION, SYSTEM_INSTRUCTION, resolve_model
+from app.ai.persona import PERSONA_VERSION, build_system_instruction, resolve_model
 from app.ai.tools import PARENT_APP_TOOLS, tool_snapshot
 from app.core.config import Settings, get_settings
 from app.core.errors import ApiError, DependencyUnavailable
 from app.core.logging import current_request_id, get_logger
 from app.db.base import utcnow
+from app.jobs.queue import enqueue_job
+from app.jobs.types import JobType
 from app.models.ai import Conversation, LiveSession
 from app.models.enums import (
     ConversationChannel,
@@ -44,8 +46,13 @@ from app.models.enums import (
     UserStatus,
 )
 from app.models.identity import FamilyMembership, SeniorProfile, User
+from app.services import memories as memory_service
 
 logger = get_logger(__name__)
+
+# How long after a conversation ends before it is read back. Long enough for
+# the browser's final `keepalive` transcript post to land.
+REVIEW_DELAY_SECONDS = 30
 
 
 class RateLimited(ApiError):
@@ -81,6 +88,7 @@ class LiveTokenMinter(Protocol):
         api_version: str,
         tools: list[dict[str, Any]],
         settings: Settings,
+        system_instruction: str,
     ) -> MintedToken: ...
 
 
@@ -104,6 +112,7 @@ class FakeLiveTokenMinter:
         api_version: str,
         tools: list[dict[str, Any]],
         settings: Settings,
+        system_instruction: str,
     ) -> MintedToken:
         if self.fail_with is not None:
             failure, self.fail_with = self.fail_with, None
@@ -114,7 +123,7 @@ class FakeLiveTokenMinter:
                 "model": model,
                 "api_version": api_version,
                 "tools": [tool["name"] for tool in tools],
-                "system_instruction": SYSTEM_INSTRUCTION,
+                "system_instruction": system_instruction,
             }
         )
         return MintedToken(
@@ -168,6 +177,7 @@ class GeminiLiveTokenMinter:
         api_version: str,
         tools: list[dict[str, Any]],
         settings: Settings,
+        system_instruction: str,
     ) -> MintedToken:
         from google.genai import types
 
@@ -180,9 +190,17 @@ class GeminiLiveTokenMinter:
         config = types.LiveConnectConfig(
             response_modalities=[types.Modality.AUDIO],
             system_instruction=types.Content(
-                parts=[types.Part(text=SYSTEM_INSTRUCTION)]
+                parts=[types.Part(text=system_instruction)]
             ),
             output_audio_transcription=types.AudioTranscriptionConfig(),
+            # Both halves of the conversation, not just Gamira's. Without this
+            # the person's own words are never transcribed at all — which left
+            # `retention_policy="transcript_only"` describing something that did
+            # not exist, and left nothing for Gamira to remember them by.
+            #
+            # Pinned into the ephemeral token like everything else here, so the
+            # browser cannot turn it on, off, or up.
+            input_audio_transcription=types.AudioTranscriptionConfig(),
             tools=[types.Tool(function_declarations=declarations)] if tools else None,
             realtime_input_config=types.RealtimeInputConfig(
                 automatic_activity_detection=types.AutomaticActivityDetection(
@@ -348,10 +366,21 @@ async def create_live_session(
     model, _spec = resolve_model(settings.gemini_live_model)
     api_version = settings.gemini_live_api_version or _spec["api_version"]
     snapshot = tool_snapshot(PARENT_APP_TOOLS)
+    # What Gamira remembers about this person, pinned into the token alongside
+    # the persona and the tools. It has to be here rather than sent later: the
+    # instruction is part of the connect constraints, so the browser cannot add
+    # to it, remove from it, or open a session without it.
+    instruction = build_system_instruction(
+        await memory_service.recall_for_prompt(db, senior_profile_id=senior.id)
+    )
 
     try:
         token = await minter.mint(
-            model=model, api_version=api_version, tools=snapshot, settings=settings
+            model=model,
+            api_version=api_version,
+            tools=snapshot,
+            settings=settings,
+            system_instruction=instruction,
         )
     except Exception as exc:
         # One message for every way minting can fail, and it says what is still
@@ -546,18 +575,42 @@ async def expire_stale_sessions(
 
     Run before the concurrency check so a phone that was closed without saying
     goodbye does not hold a slot until somebody notices.
+
+    The conversations behind them are ended here too. Somebody who puts the
+    phone down mid-sentence is the common case, not the exception, and their
+    conversation would otherwise stay ``active`` forever — never read back,
+    never remembered, and never retained or deleted by any rule.
     """
     now = now or utcnow()
-    result = await db.execute(
-        update(LiveSession)
-        .where(
-            LiveSession.status == LiveSessionStatus.ACTIVE,
-            LiveSession.expires_at <= now,
-        )
-        .values(status=LiveSessionStatus.EXPIRED, closed_at=now)
-        .execution_options(synchronize_session=False)
+    stale = list(
+        (
+            await db.execute(
+                select(LiveSession).where(
+                    LiveSession.status == LiveSessionStatus.ACTIVE,
+                    LiveSession.expires_at <= now,
+                )
+            )
+        ).scalars()
     )
-    return int(result.rowcount or 0)
+    if not stale:
+        return 0
+
+    for live_session in stale:
+        live_session.status = LiveSessionStatus.EXPIRED
+        live_session.closed_at = now
+        if not live_session.conversation_id:
+            continue
+        conversation = await db.get(Conversation, live_session.conversation_id)
+        if conversation is None or conversation.status is not ConversationStatus.ACTIVE:
+            continue
+        conversation.status = ConversationStatus.ENDED
+        conversation.ended_at = now
+        # A provisional session is a wake word that came to nothing; there is
+        # no conversation to read back, and `gather` would refuse it anyway.
+        if not live_session.provisional:
+            await _queue_review(db, conversation=conversation, now=now)
+    await db.flush()
+    return len(stale)
 
 
 async def close_live_session(
@@ -576,8 +629,34 @@ async def close_live_session(
             if conversation is not None:
                 conversation.status = ConversationStatus.ENDED
                 conversation.ended_at = now
+                await _queue_review(db, conversation=conversation, now=now)
         await db.flush()
     return live_session
+
+
+async def _queue_review(
+    db: AsyncSession, *, conversation: Conversation, now: dt.datetime
+) -> None:
+    """Ask for this conversation to be read back, shortly.
+
+    Not immediately: the browser posts its last transcript batch with
+    ``keepalive`` at the same moment it closes the session, and a review that
+    started this instant would read an exchange missing its final turns — which
+    are usually the ones worth reading.
+
+    Deduped on the conversation, so a session closed by hand and then swept as
+    expired queues one review, not two. Enqueued in the caller's transaction,
+    so a conversation that did not really end does not leave a job behind.
+    """
+    await enqueue_job(
+        db,
+        JobType.AI_CONVERSATION_REVIEW,
+        payload={"conversation_id": str(conversation.id)},
+        dedupe_key=f"conversation-review:{conversation.id}",
+        family_id=conversation.family_id,
+        run_after=now + dt.timedelta(seconds=REVIEW_DELAY_SECONDS),
+        request_id=current_request_id() or None,
+    )
 
 
 __all__ = [

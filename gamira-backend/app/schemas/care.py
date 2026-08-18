@@ -83,6 +83,12 @@ class ReminderOut(ApiModel):
     timezone: str
     status: ReminderStatus
     last_completed_at: dt.datetime | None = None
+    # Set only on a reminder Gamira proposed. Both travel with it so a family
+    # can check what she heard against what was actually said — a suggestion
+    # whose reasoning is invisible is one they can only guess at, and guessing
+    # is not consent.
+    suggestion_reason: str | None = None
+    suggested_from_conversation_id: uuid.UUID | None = None
     created_at: dt.datetime
 
 

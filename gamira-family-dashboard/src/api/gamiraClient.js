@@ -281,8 +281,46 @@ export const appointments = {
     request(`/appointments/${appointmentId}`, { method: 'PATCH', body: patch }),
 };
 
+export const ai = {
+  /**
+   * Ask a question about one person's record.
+   *
+   * The backend resolves the context from the caller's verified membership,
+   * never from anything in the message — the message itself is passed to the
+   * model as untrusted content. Pass `conversationId` back to keep a thread.
+   *
+   * Returns `{ conversation_id, reply, model, provider, refused, refusal_code }`.
+   * A 503 means the assistant is unavailable; every other screen still works,
+   * and the caller is expected to say so rather than retry in a loop.
+   */
+  chat: ({ seniorId, message, conversationId = null }) =>
+    request('/ai/chat', {
+      method: 'POST',
+      body: {
+        senior_id: seniorId,
+        message,
+        ...(conversationId ? { conversation_id: conversationId } : {}),
+      },
+    }),
+
+  /**
+   * What Gamira remembers about one person.
+   *
+   * The same list they see on their own device, and either side can remove
+   * anything from it. There is no create: a memory is Gamira's, and a note a
+   * family member wrote is a `family_notes` row with their name on it.
+   */
+  memories: (seniorId) => request(`/ai/seniors/${seniorId}/memories`),
+  forgetMemory: (memoryId) =>
+    request(`/ai/memories/${memoryId}`, { method: 'DELETE' }),
+
+  /** Generated summaries for one person, newest period first. */
+  summaries: (seniorId) => request(`/ai/seniors/${seniorId}/summaries`),
+};
+
 export const gamira = {
   request,
+  ai,
   auth,
   families,
   seniors,

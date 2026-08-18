@@ -26,27 +26,48 @@ export default function GamiraSOSButton({
   yesLabel,
   cancelLabel,
   openSignal = 0,
+  // Seconds between the assistant opening this and it raising the alert
+  // itself. 0 raises immediately — asking somebody who has just said they need
+  // help to then press a button is asking the one thing they may not be able to
+  // do. Raised is also the recoverable direction: what it raises is an in-app
+  // alert to their own family, and a false one costs a phone call.
+  autoConfirmSeconds = 0,
 }) {
   const [open, setOpen] = useState(false);
   // 'ask' | 'sending' | 'sent' | 'failed'
   const [phase, setPhase] = useState('ask');
   const [error, setError] = useState('');
+  // Seconds left before this raises itself, or null when nothing is counting.
+  const [countdown, setCountdown] = useState(null);
 
   // `openSignal` is bumped when something outside this component asks for the
-  // SOS screen — the voice assistant's `prepare_sos`, for instance. It opens
-  // the same dialog with the same confirmation. It cannot press it: `phase`
-  // starts at 'ask' either way, so a person still has to say yes.
+  // SOS screen — the voice assistant's `prepare_sos`.
+  //
+  // Somebody who asked for help by voice may not be able to reach the screen:
+  // that is frequently the reason they used their voice. So a voice-opened
+  // dialog counts down and then raises the alert itself, rather than waiting
+  // for a press that may never come.
+  //
+  // The safety is in which direction the default falls. Cancelling is one large
+  // button and takes one tap; the alert it would otherwise raise is an in-app
+  // message to their own family, not a call to anybody. Pressing the button by
+  // hand still asks, with no timer, because a person holding the phone has
+  // already answered the question.
   useEffect(() => {
     if (!openSignal) return;
     setPhase('ask');
     setError('');
     setOpen(true);
-  }, [openSignal]);
+    // 0 raises on the next tick; a negative value means never, leaving the
+    // dialog waiting for a press the way a hand-pressed one does.
+    setCountdown(autoConfirmSeconds >= 0 ? autoConfirmSeconds : null);
+  }, [openSignal, autoConfirmSeconds]);
 
   const close = () => {
     setOpen(false);
     setPhase('ask');
     setError('');
+    setCountdown(null);
   };
 
   const confirm = async () => {
@@ -63,6 +84,21 @@ export default function GamiraSOSButton({
       setPhase('failed');
     }
   };
+
+  // Tick the countdown, and raise the alert when it runs out. Any interaction
+  // with the dialog stops it: somebody who is reading and deciding is somebody
+  // who does not need it decided for them.
+  useEffect(() => {
+    if (countdown === null || phase !== 'ask') return undefined;
+    if (countdown <= 0) {
+      setCountdown(null);
+      confirm();
+      return undefined;
+    }
+    const timer = setTimeout(() => setCountdown((n) => (n === null ? null : n - 1)), 1000);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [countdown, phase]);
 
   // Escape closes it too. Someone who opened this by accident needs a way out
   // that does not involve finding a small button.
@@ -136,6 +172,11 @@ export default function GamiraSOSButton({
               <>
                 <h3 className="text-xl font-bold text-foreground">{confirmTitle}</h3>
                 <p className="mt-1 text-[15px] text-muted-foreground">{confirmMsg}</p>
+                {countdown !== null && (
+                  <p className="mt-3 text-[17px] font-semibold text-destructive">
+                    Telling your family in {countdown}…
+                  </p>
+                )}
               </>
             )}
 
@@ -171,11 +212,21 @@ export default function GamiraSOSButton({
                 </button>
               ) : null}
 
+              {/* While the countdown runs this is the safety valve, so it stops
+                  looking like the quiet secondary option. */}
               <button
                 onClick={close}
-                className="h-14 rounded-2xl border border-border bg-card text-[15px] font-semibold text-foreground transition active:scale-95"
+                className={`h-14 rounded-2xl border text-[15px] font-semibold transition active:scale-95 ${
+                  countdown !== null
+                    ? 'border-foreground bg-foreground text-background'
+                    : 'border-border bg-card text-foreground'
+                }`}
               >
-                {phase === 'sent' ? 'Close' : cancelLabel}
+                {phase === 'sent'
+                  ? 'Close'
+                  : countdown !== null
+                    ? "No, I'm alright"
+                    : cancelLabel}
               </button>
             </div>
           </motion.div>

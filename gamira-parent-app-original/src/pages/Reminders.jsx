@@ -3,6 +3,7 @@ import { AlertCircle, Bell, Check, SkipForward } from 'lucide-react';
 import GamiraSectionHeader from '@/components/gamira/GamiraSectionHeader';
 import GamiraCard from '@/components/gamira/GamiraCard';
 import { useT } from '@/lib/i18n';
+import { sortableTime } from '@/lib/schedule';
 import { useSeniorCare } from '@/lib/useSeniorCare';
 import { doses as dosesApi } from '@/api/gamiraClient';
 import { OPEN_DOSE_STATUSES, clockTime } from '@/api/parentData';
@@ -33,13 +34,18 @@ export default function Reminders() {
     }
   };
 
+  // Doses and routines stay in separate sections here on purpose: a dose has
+  // Taken and Skip against it and a routine does not, and mixing them would put
+  // rows with buttons and rows without into one column. Each section is still
+  // ordered by the clock.
+  const byTime = (a, b) => sortableTime(a).localeCompare(sortableTime(b));
   const open = doses
     .filter((dose) => OPEN_DOSE_STATUSES.includes(dose.status))
-    .sort((a, b) => a.scheduled_local_time.localeCompare(b.scheduled_local_time));
+    .sort((a, b) => byTime(a.scheduled_local_time, b.scheduled_local_time));
   const done = doses.filter((dose) => ['taken', 'skipped'].includes(dose.status));
   const routines = reminders
     .filter((reminder) => reminder.status === 'active')
-    .sort((a, b) => String(a.local_time).localeCompare(String(b.local_time)));
+    .sort((a, b) => byTime(a.local_time, b.local_time));
 
   const shownError = actionError || error;
 

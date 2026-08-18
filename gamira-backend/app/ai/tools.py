@@ -12,7 +12,13 @@ Three kinds of tool, and the difference decides where each one runs:
   the real SOS or dialer confirmation). These never reach the backend; the
   browser dispatches them through an allowlist of its own.
 * ``mutation`` — the backend changes something, always through the same service
-  function the ordinary endpoint uses, and always behind a confirmation.
+  function the ordinary endpoint uses.
+
+Whether a mutation is confirmed first is a property of the tool, not of the
+model's mood. Anything clinical or irreversible always is. A couple of everyday
+ones are confirmed only when *Gamira* is the one proposing them — see
+``needs_confirmation`` at the bottom of this file, which is where that rule
+lives, in code, rather than in a prompt.
 
 Every schema sets ``additionalProperties: false``. A model that invents an
 argument gets ``invalid_arguments``, not a silently ignored field.
@@ -44,9 +50,16 @@ class ToolSpec:
     kind: ToolKind
     description: str
     parameters: dict[str, Any]
-    # Whether a person must confirm before this runs. Every mutation does;
-    # so does anything that opens a dialer or an emergency flow.
+    # Whether a person must confirm before this runs, always and regardless of
+    # how it came up: anything clinical, and anything that opens a dialer or an
+    # emergency flow.
     requires_confirmation: bool = False
+    # Confirm only when Gamira proposed it herself. For an everyday, reversible
+    # action, a person asking for it out loud *is* the confirmation — putting a
+    # dialog in front of what they just requested is a second hurdle, and worst
+    # for the person least able to clear it. A suggestion is different: nobody
+    # asked, so it gets confirmed like anything else.
+    confirm_when_unasked: bool = False
     # The minimum family role. ``None`` means any active member, which is what
     # read tools use — the senior themselves holds a viewer role.
     min_role: MembershipRole | None = None
@@ -80,6 +93,19 @@ _UUID = {
     "type": "string",
     "format": "uuid",
     "description": "An id returned by an earlier tool result.",
+}
+
+# Who wanted this. Required on the tools that skip their dialog when the person
+# asked for it themselves, so the model has to state which case it is rather
+# than have it inferred from the shape of the conversation.
+_PROPOSED_BY = {
+    "type": "string",
+    "enum": ["them", "gamira"],
+    "description": (
+        "'them' when this person asked for this in their own words just now. "
+        "'gamira' when you are the one suggesting it and they have not agreed "
+        "yet. Answer honestly: 'them' means it happens straight away."
+    ),
 }
 
 
@@ -190,13 +216,47 @@ CATALOGUE: dict[str, ToolSpec] = {
         description="Show the details of one reminder on screen.",
         parameters=_object({"reminder_id": _UUID}, required=["reminder_id"]),
     ),
+    "get_current_time": ToolSpec(
+        name="get_current_time",
+        kind="client",
+        description=(
+            "The current time and date where this person is. Use this whenever "
+            "the answer depends on 'now' — what time it is, what day it is, or "
+            "how long until something on their schedule."
+        ),
+        parameters=_object(),
+    ),
+    "get_weather": ToolSpec(
+        name="get_weather",
+        kind="client",
+        description=(
+            "The weather outside right now, from this device's own location. "
+            "Report only what it returns. Never turn it into advice about "
+            "whether to go out, and never connect it to how somebody feels."
+        ),
+        parameters=_object(),
+    ),
+    "end_conversation": ToolSpec(
+        name="end_conversation",
+        kind="client",
+        description=(
+            "Close the voice session and stop listening. Use this as soon as "
+            "the person signals they are finished — 'bye', 'goodbye', 'thank "
+            "you, that is all', 'stop', 'go to sleep'. Say a short goodbye "
+            "first, then call this. Do not call it while anything is still "
+            "waiting on them."
+        ),
+        parameters=_object(),
+    ),
     "prepare_sos": ToolSpec(
         name="prepare_sos",
         kind="client",
         description=(
-            "Open the real SOS confirmation screen so the person can press it "
-            "themselves. This does NOT raise an alert. You must never claim "
-            "that help has been called."
+            "Open the SOS screen when this person needs help. It starts a short "
+            "countdown they can cancel, then raises an in-app alert their "
+            "family sees. It does NOT call emergency services and does not "
+            "contact anybody outside the app — you must never say that help is "
+            "on the way, or that anybody has been called."
         ),
         parameters=_object(),
         requires_confirmation=True,
@@ -235,17 +295,147 @@ CATALOGUE: dict[str, ToolSpec] = {
         parameters=_object({"dose_event_id": _UUID}, required=["dose_event_id"]),
         requires_confirmation=True,
     ),
+    "create_reminder": ToolSpec(
+        name="create_reminder",
+        kind="mutation",
+        description=(
+            "Add an everyday reminder for this person — a routine like drinking "
+            "water, a walk, watering the plants, or ringing somebody. If they "
+            "asked for it, it is added straight away and you simply tell them "
+            "you have. If you are suggesting it, they are asked to confirm "
+            "first. "
+            "This is NOT for medicines: you cannot add, change or schedule a "
+            "medication or a dose, and asking for one this way does not make it "
+            "allowed. If they want a medicine added, say that a family member "
+            "has to do it in the Gamira dashboard."
+        ),
+        parameters=_object(
+            {
+                "proposed_by": _PROPOSED_BY,
+                "title": {
+                    "type": "string",
+                    "maxLength": 120,
+                    "description": "What the reminder is for, in their own words.",
+                },
+                "local_time": {
+                    "type": "string",
+                    "pattern": r"^([01][0-9]|2[0-3]):[0-5][0-9]$",
+                    "description": "Time of day as 24-hour HH:MM in their timezone.",
+                },
+                "instructions": {
+                    "type": "string",
+                    "maxLength": 300,
+                    "description": "Anything else they said about it. Optional.",
+                },
+            },
+            required=["proposed_by", "title", "local_time"],
+        ),
+        confirm_when_unasked=True,
+    ),
     "complete_reminder": ToolSpec(
         name="complete_reminder",
         kind="mutation",
-        description="Mark one reminder as done. Requires the person to confirm first.",
-        parameters=_object({"reminder_id": _UUID}, required=["reminder_id"]),
-        requires_confirmation=True,
+        description=(
+            "Mark one everyday reminder as done. If they told you they have "
+            "done it, mark it and say so. If you are the one asking whether "
+            "they have, they are asked to confirm first."
+        ),
+        parameters=_object(
+            {"proposed_by": _PROPOSED_BY, "reminder_id": _UUID},
+            required=["proposed_by", "reminder_id"],
+        ),
+        confirm_when_unasked=True,
         # Completing somebody else's reminder is a care action; doing your own
         # is not. The policy engine applies this the same way it does for doses.
         min_role=None,
     ),
+    "remember_this": ToolSpec(
+        name="remember_this",
+        kind="mutation",
+        description=(
+            "Keep one small, ordinary thing about this person so you still know "
+            "it next time you speak — who visits them, what they like being "
+            "called, that they walk before breakfast, that their grandson's "
+            "exams are in June. Tell them you will remember it, then call this. "
+            "One thing per call, in a short sentence of your own. "
+            "Never use this for anything medical: no symptoms, no readings, no "
+            "medicines, no diagnoses, and nothing about how they seem to be "
+            "feeling. Never store a phone number, an address, a password or an "
+            "id. They can see everything you keep and can delete any of it, so "
+            "only keep what you would be glad to have them read."
+        ),
+        parameters=_object(
+            {
+                "kind": {
+                    "type": "string",
+                    "enum": ["person", "preference", "routine", "interest", "event"],
+                    "description": "Which sort of thing this is.",
+                },
+                "content": {
+                    "type": "string",
+                    "maxLength": 300,
+                    "description": (
+                        "The thing itself, in one short sentence about them."
+                    ),
+                },
+            },
+            required=["kind", "content"],
+        ),
+    ),
+    # ------------------------------------------------------------------ #
+    # Answering a confirmation
+    # ------------------------------------------------------------------ #
+    #
+    # These exist so a spoken "yes" is worth as much as a tap. Neither one
+    # decides anything: the action, its arguments and its wording were all
+    # settled when the confirmation was raised, and these two only carry the
+    # answer back to the decision already sitting in the database.
+    "confirm_pending_action": ToolSpec(
+        name="confirm_pending_action",
+        kind="mutation",
+        description=(
+            "They said yes to the confirmation you just read out. Call this "
+            "with the decision_id that confirmation gave you, and say what it "
+            "returns — it is the only way to know the action really happened. "
+            "Only ever use an id from this conversation, and only after a clear "
+            "yes. If you are not sure what they meant, ask again instead."
+        ),
+        parameters=_object({"decision_id": _UUID}, required=["decision_id"]),
+    ),
+    "cancel_pending_action": ToolSpec(
+        name="cancel_pending_action",
+        kind="mutation",
+        description=(
+            "They said no to the confirmation you just read out, or changed "
+            "their mind. Call this with its decision_id. Nothing is changed, "
+            "and that is a perfectly good outcome — do not talk them into it."
+        ),
+        parameters=_object({"decision_id": _UUID}, required=["decision_id"]),
+    ),
 }
+
+# The two tools above act on an existing decision rather than proposing one, so
+# the executor routes them before it writes a decision of its own.
+TOOL_CONFIRM_PENDING = "confirm_pending_action"
+TOOL_CANCEL_PENDING = "cancel_pending_action"
+
+
+def needs_confirmation(spec: ToolSpec, arguments: dict[str, Any]) -> bool:
+    """Does this particular call have to be confirmed before it runs?
+
+    Deterministic, and the only place the question is answered. ``arguments``
+    have already passed the strict schema, so ``proposed_by`` is either one of
+    the two allowed strings or absent.
+
+    A model that mislabels a suggestion as something they asked for gets one
+    everyday reminder that nobody wanted — visible in both apps, deletable, and
+    not clinical. Nothing with a medical record behind it is decided here:
+    those specs set ``requires_confirmation`` and never reach the second line.
+    """
+    if spec.requires_confirmation:
+        return True
+    return spec.confirm_when_unasked and arguments.get("proposed_by") != "them"
+
 
 # What the senior-facing Parent App gets. Deliberately the whole catalogue
 # *minus* nothing yet — but expressed as an explicit list so narrowing it later
@@ -286,9 +476,12 @@ __all__ = [
     "FAMILY_APP_TOOLS",
     "NAVIGABLE_SCREENS",
     "PARENT_APP_TOOLS",
+    "TOOL_CANCEL_PENDING",
+    "TOOL_CONFIRM_PENDING",
     "ToolKind",
     "ToolSpec",
     "get_tool",
+    "needs_confirmation",
     "snapshot_names",
     "tool_snapshot",
 ]

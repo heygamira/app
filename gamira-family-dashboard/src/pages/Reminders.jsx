@@ -1,11 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Bell, Check, Clock, Pencil, Pill, Plus, SkipForward, Trash2 } from "lucide-react";
+import { Sparkles, Bell, Check, Clock, Pencil, Pill, Plus, SkipForward, Trash2 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useAuth } from "@/lib/AuthContext";
 import { useSwipeNav } from "@/lib/useSwipeNav";
 import { dosesApi, remindersApi, toMember } from "@/api/dashboardData";
 import { OPEN_DOSE_STATUSES } from "@/lib/careStatus";
+import { byLocalTime } from "@/lib/schedule";
 import EmptyState from "@/components/gamira/EmptyState";
 import MemberSelector from "@/components/gamira/MemberSelector";
 
@@ -70,6 +71,58 @@ function DoseRow({ dose, onTaken, onSkipped, busy }) {
           </button>
         </>
       )}
+    </div>
+  );
+}
+
+/**
+ * A reminder Gamira proposed, waiting on a person.
+ *
+ * Kept visibly apart from the real ones rather than folded in with a badge.
+ * It is not on anybody's schedule and it prompts nobody — the backend writes
+ * it with a status every "live reminders" query excludes — so showing it as
+ * though it were already running would be a lie about what the app is doing.
+ *
+ * Both answers are one tap and neither is dressed up as the right one:
+ * ignoring a suggestion is a perfectly good outcome.
+ */
+function SuggestionRow({ reminder, busy, onAccept, onDismiss }) {
+  return (
+    <div className="p-3.5 bg-white rounded-[18px] shadow-soft border border-primary/30">
+      <div className="flex items-start gap-3">
+        <div className="w-9 h-9 rounded-xl bg-primary/10 flex items-center justify-center shrink-0">
+          <Sparkles className="w-5 h-5 text-primary" strokeWidth={2} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-[14px] font-semibold leading-tight text-foreground">
+            {reminder.title}
+          </p>
+          <p className="text-[11px] text-muted-foreground mt-0.5">
+            {[reminder.time, reminder.family_member_name].filter(Boolean).join(" · ")}
+          </p>
+          {reminder.suggestion_reason && (
+            <p className="text-[12px] text-muted-foreground mt-1.5 leading-snug">
+              Gamira heard: {reminder.suggestion_reason}
+            </p>
+          )}
+        </div>
+      </div>
+      <div className="flex gap-2 mt-3">
+        <button
+          onClick={() => onAccept(reminder)}
+          disabled={busy}
+          className="flex-1 h-9 rounded-xl bg-primary text-primary-foreground text-[13px] font-semibold disabled:opacity-60"
+        >
+          Add it
+        </button>
+        <button
+          onClick={() => onDismiss(reminder)}
+          disabled={busy}
+          className="flex-1 h-9 rounded-xl bg-secondary text-foreground text-[13px] font-semibold disabled:opacity-60"
+        >
+          No thanks
+        </button>
+      </div>
     </div>
   );
 }
@@ -203,6 +256,22 @@ export default function Reminders() {
     }
   };
 
+  const answerSuggestion = async (reminder, accept) => {
+    setBusyId(reminder.id);
+    try {
+      // Accepting is the ordinary status change a family member could make by
+      // hand; dismissing is the ordinary delete. Nothing here is a special AI
+      // path with its own permissions.
+      if (accept) await remindersApi.update(reminder.id, { status: "active" });
+      else await remindersApi.remove(reminder.id);
+      await load();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   const removeReminder = async (reminder) => {
     try {
       await remindersApi.remove(reminder.id);
@@ -219,7 +288,14 @@ export default function Reminders() {
       if (filter === "done") return !OPEN_DOSE_STATUSES.includes(dose.status);
       return true;
     })
-    .sort((a, b) => a.scheduled_local_time.localeCompare(b.scheduled_local_time));
+    .sort(byLocalTime((dose) => dose.scheduled_local_time));
+
+  // Suggestions are their own thing: not active, not completed, and not
+  // something the open/done filter has an opinion about.
+  const suggestions = reminders
+    .filter((reminder) => reminder.status === "suggested")
+    .filter((reminder) => reminder.family_member_id === selected?.id)
+    .sort(byLocalTime((reminder) => reminder.time));
 
   const visibleReminders = reminders
     .filter((reminder) => reminder.family_member_id === selected?.id)
@@ -227,9 +303,15 @@ export default function Reminders() {
       if (filter === "open") return reminder.status === "active";
       if (filter === "done") return reminder.status !== "active";
       return true;
-    });
+    })
+    // This list had no sort at all, so routines appeared in whatever order the
+    // API happened to return them — which is not the order of the day.
+    .sort(byLocalTime((reminder) => reminder.time));
 
-  const isEmpty = visibleDoses.length === 0 && visibleReminders.length === 0;
+  const isEmpty =
+    visibleDoses.length === 0 &&
+    visibleReminders.length === 0 &&
+    suggestions.length === 0;
 
   return (
     <div className="space-y-5 select-none min-h-[calc(100vh-9rem)]" {...swipe}>
@@ -328,6 +410,23 @@ export default function Reminders() {
                         busy={busyId === dose.id}
                         onTaken={(d) => record(d, "taken")}
                         onSkipped={(d) => record(d, "skipped")}
+                      />
+                    ))}
+                  </section>
+                )}
+
+                {suggestions.length > 0 && (
+                  <section className="space-y-2.5">
+                    <p className="text-[11px] font-semibold text-primary uppercase tracking-wide px-1">
+                      Gamira suggests
+                    </p>
+                    {suggestions.map((reminder) => (
+                      <SuggestionRow
+                        key={reminder.id}
+                        reminder={reminder}
+                        busy={busyId === reminder.id}
+                        onAccept={(r) => answerSuggestion(r, true)}
+                        onDismiss={(r) => answerSuggestion(r, false)}
                       />
                     ))}
                   </section>

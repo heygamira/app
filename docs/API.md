@@ -178,7 +178,17 @@ configuration.
 - ✅ `POST /ai/live-sessions` — authenticated Live session + ephemeral token
 - ✅ `POST /ai/live-sessions/{session_id}/tool-calls` — one Live message's
   function calls, as a batch
+- ✅ `POST /ai/live-sessions/{session_id}/promote` — turn a speculative
+  wake-word session into a real one
+- ✅ `POST /ai/live-sessions/{session_id}/transcript` — a batch of turns,
+  both sides, written against that session's conversation
 - ✅ `POST /ai/live-sessions/{session_id}/close`
+- ✅ `GET /ai/seniors/{senior_id}/memories` — what Gamira remembers about
+  one person. Read by both apps; the person sees their own.
+- ✅ `DELETE /ai/memories/{memory_id}` — forget one. Any active member,
+  including the cared-for person themselves.
+- ✅ `GET /ai/seniors/{senior_id}/family-notices` — what Gamira has told
+  this person's family about them, for the person themselves to read
 - ✅ `GET /ai/actions/{decision_id}`
 - ✅ `POST /ai/actions/{decision_id}/confirm`
 - ✅ `POST /ai/actions/{decision_id}/reject`

@@ -106,7 +106,14 @@ class Settings(BaseSettings):
 
     ai_provider: Literal["fake", "gemini"] = "fake"
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.5-flash"
+    # The text layer: chat replies and weekly summaries. Flash Lite is the right
+    # size for it — every answer is written from figures the backend already
+    # counted, against a schema, with the safety rules in the system prompt, so
+    # the work is phrasing rather than reasoning. Measured on the real prompt it
+    # answers in about a second and holds the "never say a reading is healthy"
+    # line. Note 2.5-flash-lite is closed to new keys; Google's own 404 points
+    # here.
+    gemini_model: str = "gemini-3.5-flash-lite"
     gemini_live_model: str = "gemini-3.1-flash-live-preview"
     gemini_live_api_version: str = "v1alpha"
     ai_request_timeout_seconds: float = 30.0
@@ -129,6 +136,19 @@ class Settings(BaseSettings):
     ai_requests_per_hour: int = 60
     # How long a confirmation prompt stays answerable before it expires.
     ai_confirmation_ttl_seconds: int = 300
+    # Quiet hours for anything Gamira volunteers, read in the cared-for
+    # person's own timezone. Nothing she raises herself is urgent — the urgent
+    # path is an alert, which she cannot raise — so a notice that would land at
+    # three in the morning waits until the morning. Set both to the same hour
+    # to switch this off.
+    family_notice_quiet_start_hour: int = 21
+    family_notice_quiet_end_hour: int = 8
+    # How long a stored conversation is kept before its transcript is deleted.
+    # `retention_policy="transcript_only"` on every conversation has always
+    # promised this; this is the number that makes it true. Long enough for a
+    # family to look back over a fortnight, short enough that a voice companion
+    # is not building an indefinite record of somebody's private talk.
+    conversation_retention_days: int = 30
 
     file_storage_backend: Literal["local", "gcs"] = "local"
     file_storage_dir: str = "./.local-storage"

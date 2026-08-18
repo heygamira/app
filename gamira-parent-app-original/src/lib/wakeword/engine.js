@@ -15,6 +15,7 @@
 //     Real always-on listening needs the native app.
 
 import { loadWakeBundle } from './bundle.js';
+import { playSound } from './sounds.js';
 
 const OUTPUT_RATE = 24_000;
 const TARGET_RATE = 16_000;
@@ -136,6 +137,12 @@ export function startWakeWordEngine({
   let sinkNode = null;
   let worker = null;
   let ready = false;
+  // Whether the owner has asked for scoring to stop. Latched rather than sent
+  // and forgotten: the engine takes a moment to load, and a pause that arrives
+  // in that window would otherwise be dropped on the floor — leaving the
+  // detector scoring right through a live conversation, where the loudest thing
+  // in the room is Gamira's own voice.
+  let pauseRequested = false;
 
   // Rolling PCM, so the words spoken while the session is still connecting are
   // not lost. Sized at construction, once the real sample rate is known.
@@ -226,34 +233,29 @@ export function startWakeWordEngine({
     },
 
     /**
-     * A short rising blip, on the already-running playback context.
+     * Make one of Gamira's sounds, on the already-running playback context.
      *
-     * This is the piece that actually makes the remaining latency tolerable.
-     * Acknowledging within 50 ms is what every voice assistant relies on, and
-     * it costs nothing: no asset, no fetch, no decode.
+     * The wake sound is the piece that actually makes the remaining connection
+     * latency tolerable. Acknowledging within 50 ms is what every voice
+     * assistant relies on, and it costs nothing here: no asset, no fetch, no
+     * decode — see `sounds.js`.
+     *
+     * @param {'wake' | 'stopped' | 'unavailable'} event
+     * @param {import('./sounds.js').WakeSound} [voice]
      */
-    chime() {
-      if (!playbackCtx || playbackCtx.state !== 'running') return;
-      const now = playbackCtx.currentTime;
-      const osc = playbackCtx.createOscillator();
-      const gain = playbackCtx.createGain();
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(660, now);
-      osc.frequency.exponentialRampToValueAtTime(990, now + 0.09);
-      // Soft attack and decay: a click is startling, and this app is used by
-      // someone who may have the phone close to their ear.
-      gain.gain.setValueAtTime(0.0001, now);
-      gain.gain.exponentialRampToValueAtTime(0.14, now + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.22);
-      osc.connect(gain);
-      gain.connect(playbackCtx.destination);
-      osc.start(now);
-      osc.stop(now + 0.24);
+    sound(event, voice) {
+      playSound(playbackCtx, event, voice);
     },
 
     /** Stop scoring but keep every resource warm. Used while a session is live. */
-    pause() { worker?.postMessage({ type: 'pause' }); },
-    resume() { worker?.postMessage({ type: 'resume' }); },
+    pause() {
+      pauseRequested = true;
+      worker?.postMessage({ type: 'pause' });
+    },
+    resume() {
+      pauseRequested = false;
+      worker?.postMessage({ type: 'resume' });
+    },
 
     setOptions(options) { worker?.postMessage({ type: 'options', ...options }); },
 
@@ -294,6 +296,8 @@ export function startWakeWordEngine({
         switch (message.type) {
           case 'ready':
             ready = true;
+            // Apply anything asked for while this was still loading.
+            if (pauseRequested) worker?.postMessage({ type: 'pause' });
             onReady(message);
             break;
           case 'score': onScore(message); break;
@@ -333,6 +337,10 @@ export function startWakeWordEngine({
         const chunk = event.data;
         pushRing(chunk);
         for (const fn of subscribers) fn(chunk);
+        // Nothing to score while paused, and this runs during playback — the
+        // copy and the transfer are main-thread work competing with the audio
+        // scheduler for no benefit.
+        if (pauseRequested) return;
         // A copy, because the subscribers above still hold the original and a
         // transferred buffer would be detached out from under them.
         const copy = chunk.slice();

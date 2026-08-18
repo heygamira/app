@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -20,6 +20,7 @@ from app.models.enums import (
     ConfirmationState,
     DecisionStatus,
     JobStatus,
+    MemoryKind,
     PolicyResult,
     ReviewState,
     SummaryKind,
@@ -90,6 +91,49 @@ class AiSummaryOut(ApiModel):
     generated_at: dt.datetime | None = None
     review_state: ReviewState
     created_at: dt.datetime
+
+
+# --------------------------------------------------------------------------- #
+# Memory
+# --------------------------------------------------------------------------- #
+
+
+class SeniorMemoryOut(ApiModel):
+    """One thing Gamira remembers, as both apps show it.
+
+    The provenance travels with it. Somebody reading "she prefers not to be
+    rung before nine" and wondering where that came from can see the
+    conversation, the model and the prompt version that produced it, which is
+    the difference between a memory and an unattributable claim about a person.
+    """
+
+    id: uuid.UUID
+    kind: MemoryKind
+    content: str
+    source_conversation_id: uuid.UUID | None = None
+    confidence: float | None = None
+    model: str | None = None
+    prompt_version: str | None = None
+    created_at: dt.datetime
+
+
+class FamilyNoticeOut(ApiModel):
+    """Something Gamira told this person's family about them.
+
+    Shown to the person themselves. The persona promises "if something
+    genuinely needs a family member, say so to them first, openly" — and open
+    means afterwards as well as at the time. Somebody should be able to check
+    what was said about them without asking anyone.
+    """
+
+    id: uuid.UUID
+    title: str
+    body: str
+    created_at: dt.datetime
+    # How many family members it reached. Not who: a notice is one message, and
+    # turning it into a list of who has read it is a different feature with
+    # different consent.
+    recipients: int = 1
 
 
 # --------------------------------------------------------------------------- #
@@ -166,6 +210,30 @@ class ToolCallIn(BaseModel):
     id: str = Field(min_length=1, max_length=128)
     name: str = Field(min_length=1, max_length=64)
     arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class TranscriptTurnIn(BaseModel):
+    """One thing that was said out loud, as the browser heard it.
+
+    Untrusted content, like every other thing a conversation contains: it is
+    stored and shown, and it is never treated as an instruction.
+    """
+
+    # Only the two halves of a spoken conversation. `system` and `tool` rows are
+    # written by the backend itself and must not be forgeable from a client.
+    role: Literal["user", "assistant"]
+    text: str = Field(min_length=1, max_length=4000)
+
+
+class TranscriptBatchIn(BaseModel):
+    """A few seconds of conversation, batched to keep the audio path quiet."""
+
+    turns: list[TranscriptTurnIn] = Field(min_length=1, max_length=50)
+
+
+class TranscriptBatchOut(BaseModel):
+    conversation_id: uuid.UUID
+    stored: int
 
 
 class ToolCallBatchIn(BaseModel):

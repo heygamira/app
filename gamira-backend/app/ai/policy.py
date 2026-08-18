@@ -111,8 +111,16 @@ def evaluate(
     actor: ActorContext | None,
     in_session_snapshot: bool,
     confirmation_prompt: str | None = None,
+    requires_confirmation: bool | None = None,
 ) -> PolicyDecision:
-    """The verdict for one tool call. Pure, and testable on its own."""
+    """The verdict for one tool call. Pure, and testable on its own.
+
+    ``requires_confirmation`` overrides the spec's own flag for this one call.
+    The caller works it out with ``tools.needs_confirmation``, which is the only
+    thing that reads the arguments — this function stays ignorant of them, and
+    of the model that produced them. Omitting it keeps the spec's answer, so a
+    tool that always confirms cannot be talked out of it from here.
+    """
     if not in_session_snapshot:
         # The session never declared this tool. Even a legitimate tool added to
         # the server since is not callable here.
@@ -135,7 +143,12 @@ def evaluate(
         # exactly as they cannot through the ordinary endpoint.
         return PolicyDecision(PolicyResult.DENIED, DENY_ROLE_INSUFFICIENT)
 
-    if spec.requires_confirmation:
+    confirm = (
+        spec.requires_confirmation
+        if requires_confirmation is None
+        else requires_confirmation
+    )
+    if confirm:
         return PolicyDecision(
             PolicyResult.CONFIRMATION_REQUIRED,
             "confirmation_required",

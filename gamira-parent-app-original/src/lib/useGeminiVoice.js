@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ai as aiApi } from '@/api/gamiraClient';
 import { startVoiceSession } from '@/lib/geminiVoice';
+import { getSettings } from '@/lib/userSettings';
 import { createUiDispatcher } from '@/lib/voiceTools';
 
 /**
@@ -19,8 +20,13 @@ import { createUiDispatcher } from '@/lib/voiceTools';
  * @param {(doseEventId: string) => void} [handlers.onOpenDose]
  * @param {(reminderId: string) => void} [handlers.onOpenReminder]
  * @param {(outcome?: object) => void} [handlers.onMutation]  something was recorded; reload
+ * @param {(reason: 'idle' | 'goodbye') => void} [handlers.onAutoStop]  the session closed itself
+ * @param {object} [options]
+ * @param {string} [options.timezone] the cared-for person's timezone, for the
+ *   clock tool — the device's own is the fallback, and a phone that travels
+ *   would otherwise answer "what time is it" about the wrong place.
  */
-export function useGeminiVoice(handlers = {}) {
+export function useGeminiVoice(handlers = {}, { timezone = null } = {}) {
   const navigate = useNavigate();
   const [status, setStatus] = useState('idle');
   const [error, setError] = useState(null);
@@ -30,6 +36,12 @@ export function useGeminiVoice(handlers = {}) {
   const [confirmBusy, setConfirmBusy] = useState(false);
 
   const sessionRef = useRef(null);
+  // When the model last did anything at all. Drives the idle auto-stop below.
+  const lastActivityRef = useRef(0);
+  const touch = () => { lastActivityRef.current = Date.now(); };
+  // The idle timer reads this: a dialog waiting on a person is not idleness.
+  const confirmationRef = useRef(null);
+  confirmationRef.current = confirmation;
   // True while the open session is only a guess: the wake-word detector thought
   // it heard something and started connecting, but has not confirmed it. Such a
   // session must be completely invisible — no status change, no error if it
@@ -45,15 +57,14 @@ export function useGeminiVoice(handlers = {}) {
   handlersRef.current = handlers;
 
   const stop = useCallback(() => {
-    const sessionId = sessionRef.current?.sessionId;
+    // The handle frees the backend's slot itself, on every path out — including
+    // the ones this function never sees, like the far end hanging up.
     sessionRef.current?.stop();
     sessionRef.current = null;
     provisionalRef.current = false;
     setStatus('idle');
     setError(null);
     setConfirmation(null);
-    // Free the backend session's slot rather than waiting for it to expire.
-    if (sessionId) aiApi.closeLiveSession(sessionId).catch(() => {});
   }, []);
 
   /**
@@ -64,23 +75,28 @@ export function useGeminiVoice(handlers = {}) {
    */
   const abandon = useCallback(() => {
     if (!provisionalRef.current) return;
-    const sessionId = sessionRef.current?.sessionId;
     sessionRef.current?.stop();
     sessionRef.current = null;
     provisionalRef.current = false;
-    if (sessionId) aiApi.closeLiveSession(sessionId).catch(() => {});
   }, []);
 
   const dispatchClientTool = useMemo(
     () =>
       createUiDispatcher({
         navigate,
+        timezone,
         openDose: (id) => handlersRef.current.onOpenDose?.(id),
         openReminder: (id) => handlersRef.current.onOpenReminder?.(id),
         openSos: () => handlersRef.current.onOpenSos?.(),
         openDialer: (contactId) => handlersRef.current.onDialContact?.(contactId),
+        // "Bye" ends the conversation. Routed through the same stop() a button
+        // press uses, so the session is released exactly the same way.
+        endConversation: () => {
+          stop();
+          handlersRef.current.onAutoStop?.('goodbye');
+        },
       }),
-    [navigate]
+    [navigate, timezone, stop]
   );
 
   /**
@@ -98,6 +114,7 @@ export function useGeminiVoice(handlers = {}) {
     const { provisional = false, resources = {} } = options;
 
     provisionalRef.current = provisional;
+    touch();
     if (!provisional) {
       setError(null);
       setTranscript('');
@@ -107,6 +124,11 @@ export function useGeminiVoice(handlers = {}) {
 
     sessionRef.current = startVoiceSession({
       createSession: (opts) => aiApi.createLiveSession(opts),
+      closeSession: (sessionId) => aiApi.closeLiveSession(sessionId).catch(() => {}),
+      // Losing a transcript is a shame; interrupting the conversation that
+      // produced it would be worse.
+      storeTranscript: (sessionId, turns, options) =>
+        aiApi.storeTranscript(sessionId, turns, options).catch(() => {}),
       sendToolCalls: (sessionId, calls) => aiApi.sendToolCalls(sessionId, calls),
       dispatchClientTool,
       provisional,
@@ -115,7 +137,19 @@ export function useGeminiVoice(handlers = {}) {
       captureCtx: resources.captureCtx || null,
       playbackCtx: resources.playbackCtx || null,
       audioSource: resources.audioSource || null,
-      onConfirmationRequired: (request) => setConfirmation(request),
+      onConfirmationRequired: (request) => {
+        touch();
+        setConfirmation(request);
+      },
+      // Answered out loud. The backend has already run it — or not — so all
+      // that is left here is to take the dialog away and reload what changed.
+      onConfirmationResolved: ({ decisionId, response }) => {
+        touch();
+        setConfirmation((prev) => (prev?.decisionId === decisionId ? null : prev));
+        if (response?.status === 'ok' && response?.outcome !== 'cancelled') {
+          handlersRef.current.onMutation?.({ tool_response: response });
+        }
+      },
       onStatus: (next) => {
         if (next === 'closed') {
           const wasProvisional = provisionalRef.current;
@@ -132,9 +166,13 @@ export function useGeminiVoice(handlers = {}) {
         // "connecting…" every time the detector half-heard something would be
         // worse than the latency it exists to hide.
         if (provisionalRef.current) return;
+        // Every status move is the model doing something — audio arriving, a
+        // turn ending, a tool resolving. That is what "not idle" means.
+        touch();
         setStatus(next);
       },
       onTranscript: (text) => {
+        touch();
         if (freshTurnRef.current) {
           freshTurnRef.current = false;
           setTranscript(text.trimStart());
@@ -142,7 +180,10 @@ export function useGeminiVoice(handlers = {}) {
         }
         setTranscript((prev) => (prev + text).slice(-400));
       },
-      onTurnEnd: () => { freshTurnRef.current = true; },
+      onTurnEnd: () => {
+        touch();
+        freshTurnRef.current = true;
+      },
       onError: (err) => {
         const wasProvisional = provisionalRef.current;
         sessionRef.current = null;
@@ -177,6 +218,7 @@ export function useGeminiVoice(handlers = {}) {
     if (!session || !provisionalRef.current) return false;
 
     provisionalRef.current = false;
+    touch();
     setError(null);
     setTranscript('');
     setConfirmation(null);
@@ -266,6 +308,37 @@ export function useGeminiVoice(handlers = {}) {
     }
   }, [confirmation, confirmBusy]);
 
+  /**
+   * Close a conversation nobody is having.
+   *
+   * An open session streams the microphone to Gemini continuously — it is
+   * billed for every second it is up, it holds one of two concurrent slots for
+   * half an hour, and it keeps the microphone live in the room. None of that
+   * should depend on somebody remembering to press stop, and in this app they
+   * often will not: the phone gets put down mid-sentence, or the person walks
+   * away, or the answer was all they wanted.
+   *
+   * "Idle" means the model has said and done nothing for the timeout — no
+   * audio, no transcript, no completed turn, no tool call. While somebody is
+   * actually talking, Gemini is replying, so the clock keeps resetting.
+   */
+  const active = status === 'listening' || status === 'speaking' || status === 'working';
+
+  useEffect(() => {
+    const seconds = getSettings().voiceSession?.autoStopSeconds ?? 60;
+    // 0 means never, for anyone who would rather it stayed open.
+    if (!seconds || !active) return undefined;
+
+    const timer = setInterval(() => {
+      if (Date.now() - lastActivityRef.current < seconds * 1000) return;
+      // A confirmation on screen is somebody deciding, not somebody absent.
+      if (confirmationRef.current) return;
+      stop();
+      handlersRef.current.onAutoStop?.('idle');
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [active, stop]);
+
   // Never leave the microphone open behind a navigation.
   useEffect(() => () => sessionRef.current?.stop(), []);
 
@@ -277,7 +350,7 @@ export function useGeminiVoice(handlers = {}) {
     confirmBusy,
     acceptConfirmation,
     rejectConfirmation,
-    active: status === 'listening' || status === 'speaking' || status === 'working',
+    active,
     connecting: status === 'connecting',
     working: status === 'working',
     start,

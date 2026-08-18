@@ -2,7 +2,17 @@ import { useState } from 'react';
 import { Play, Check, Volume2 } from 'lucide-react';
 import SettingsHeader from '@/components/SettingsHeader';
 import { getSettings, updateSettings } from '@/lib/userSettings';
+import { WAKE_SOUNDS, previewSound } from '@/lib/wakeword/sounds';
 import { useT } from '@/lib/i18n';
+
+// How long a conversation may sit with nobody saying anything before it closes
+// itself. An open session streams the microphone the whole time it is up.
+const autoStopChoices = [
+  { label: '30 seconds', value: 30 },
+  { label: '1 minute', value: 60 },
+  { label: '2 minutes', value: 120 },
+  { label: 'Never', value: 0 },
+];
 
 // How Gamira hears its name. 'auto' prefers the trained on-device detector and
 // falls back to the browser's own speech recognition when it cannot run; the
@@ -36,10 +46,16 @@ export default function Voice() {
     enabled: true,
     engine: 'auto',
     sensitivityOffset: 0,
-    chime: true,
+    sound: 'chime',
     preconnect: true,
     ...(s.wakeWord || {}),
   }));
+  const [autoStop, setAutoStop] = useState(
+    () => s.voiceSession?.autoStopSeconds ?? 60,
+  );
+  const [proactive, setProactive] = useState(
+    () => s.proactive?.enabled !== false,
+  );
 
   const preview = (name) => {
     setPlaying(name);
@@ -63,7 +79,13 @@ export default function Voice() {
   const save = () => {
     // The whole wake-word object every time: settings are merged one level
     // deep, so writing a partial one would drop the keys it left out.
-    updateSettings({ voice: selected, speakingSpeed: speed, wakeWord: wake });
+    updateSettings({
+      voice: selected,
+      speakingSpeed: speed,
+      wakeWord: wake,
+      voiceSession: { autoStopSeconds: autoStop },
+      proactive: { enabled: proactive },
+    });
     setSaved(true);
     setTimeout(() => setSaved(false), 2500);
   };
@@ -130,6 +152,29 @@ export default function Voice() {
         </div>
 
         <div className="mt-8">
+          <h2 className="mb-1 text-lg font-bold text-foreground">Gamira speaking first</h2>
+          <p className="mb-3 text-sm text-muted-foreground">
+            If a medicine or a reminder has been waiting a while, Gamira says so
+            out loud. It does not start listening and nothing is sent anywhere —
+            it just tells you, in case the phone is across the room.
+          </p>
+          <button
+            type="button"
+            onClick={() => setProactive((on) => !on)}
+            className={`mb-8 flex h-14 w-full items-center justify-between rounded-2xl border px-4 text-base font-semibold transition active:scale-95 ${
+              proactive ? 'border-primary bg-primary/5 text-foreground' : 'border-border bg-card text-foreground'
+            }`}
+          >
+            <span>Tell me when something is waiting</span>
+            <span
+              className={`flex h-8 w-8 items-center justify-center rounded-full border-2 ${
+                proactive ? 'border-primary bg-primary text-white' : 'border-border'
+              }`}
+            >
+              {proactive && <Check className="h-5 w-5" strokeWidth={3} />}
+            </span>
+          </button>
+
           <h2 className="mb-1 text-lg font-bold text-foreground">Saying “Gamira”</h2>
           <p className="mb-3 text-sm text-muted-foreground">
             Gamira can start listening when you say its name, so you do not have to
@@ -155,22 +200,49 @@ export default function Voice() {
 
           {wake.enabled && (
             <>
-              <button
-                type="button"
-                onClick={() => patchWake({ chime: !wake.chime })}
-                className={`mt-2 flex h-14 w-full items-center justify-between rounded-2xl border px-4 text-base font-semibold transition active:scale-95 ${
-                  wake.chime ? 'border-primary bg-primary/5 text-foreground' : 'border-border bg-card text-foreground'
-                }`}
-              >
-                <span>Make a sound when it hears me</span>
-                <span
-                  className={`flex h-8 w-8 items-center justify-center rounded-full border-2 ${
-                    wake.chime ? 'border-primary bg-primary text-white' : 'border-border'
-                  }`}
-                >
-                  {wake.chime && <Check className="h-5 w-5" strokeWidth={3} />}
-                </span>
-              </button>
+              <h3 className="mb-1 mt-6 text-base font-semibold text-foreground">
+                Sound when it hears me
+              </h3>
+              <p className="mb-2 text-sm text-muted-foreground">
+                Gamira answers this straight away, before it has finished connecting,
+                so you know it heard you. Tap one to hear it.
+              </p>
+              <div className="flex flex-col gap-2">
+                {WAKE_SOUNDS.map((option) => {
+                  const active = (wake.sound || 'chime') === option.key;
+                  return (
+                    <button
+                      key={option.key}
+                      type="button"
+                      onClick={() => {
+                        patchWake({ sound: option.key });
+                        // Previewing is the point of tapping, and this tap is
+                        // the gesture that lets it play at all.
+                        previewSound('wake', option.key);
+                      }}
+                      className={`flex items-center justify-between rounded-2xl border p-4 text-left transition active:scale-95 ${
+                        active ? 'border-primary bg-primary/5' : 'border-border bg-card'
+                      }`}
+                    >
+                      <div>
+                        <p className="text-base font-semibold text-foreground">{option.label}</p>
+                        <p className="text-sm text-muted-foreground">{option.desc}</p>
+                      </div>
+                      <span
+                        className={`ml-3 flex h-8 w-8 shrink-0 items-center justify-center rounded-full border-2 ${
+                          active ? 'border-primary bg-primary text-white' : 'border-border'
+                        }`}
+                      >
+                        {active ? (
+                          <Check className="h-5 w-5" strokeWidth={3} />
+                        ) : (
+                          <Play className="h-4 w-4 text-muted-foreground" />
+                        )}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
 
               <h3 className="mb-2 mt-6 text-base font-semibold text-foreground">How it listens</h3>
               <div className="flex flex-col gap-2">
@@ -230,6 +302,37 @@ export default function Voice() {
                 called it.
               </p>
             </>
+          )}
+        </div>
+
+        <div className="mt-8">
+          <h2 className="mb-1 text-lg font-bold text-foreground">Stop listening after</h2>
+          <p className="mb-3 text-sm text-muted-foreground">
+            While a conversation is open the microphone stays on. If nothing is said
+            for this long, Gamira closes it and goes back to waiting for its name.
+          </p>
+          <div className="grid grid-cols-2 gap-2">
+            {autoStopChoices.map((option) => {
+              const active = autoStop === option.value;
+              return (
+                <button
+                  key={option.label}
+                  type="button"
+                  onClick={() => setAutoStop(option.value)}
+                  className={`h-14 rounded-2xl border text-base font-semibold transition active:scale-95 ${
+                    active ? 'border-primary bg-primary text-white' : 'border-border bg-card text-foreground'
+                  }`}
+                >
+                  {option.label}
+                </button>
+              );
+            })}
+          </div>
+          {autoStop === 0 && (
+            <p className="mt-2 text-sm text-muted-foreground">
+              With “Never”, a conversation stays open until you press the button
+              again.
+            </p>
           )}
         </div>
 

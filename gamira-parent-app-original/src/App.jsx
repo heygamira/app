@@ -22,6 +22,8 @@ import AccessibilityPage from '@/pages/settings/Accessibility';
 import ContactSupport from '@/pages/settings/ContactSupport';
 import AboutGamira from '@/pages/settings/AboutGamira';
 import Theme from '@/pages/settings/Theme';
+import Memory from '@/pages/settings/Memory';
+import FamilyNotices from '@/pages/settings/FamilyNotices';
 
 // Sign-in is the only public route. ProtectedRoute distinguishes "signed out"
 // from "backend unreachable", so a failed request never looks like an expired
@@ -45,6 +47,8 @@ const AppRoutes = () => (
       <Route path="/settings/contact-support" element={<ContactSupport />} />
       <Route path="/settings/about" element={<AboutGamira />} />
       <Route path="/settings/theme" element={<Theme />} />
+      <Route path="/settings/memory" element={<Memory />} />
+      <Route path="/settings/family-notices" element={<FamilyNotices />} />
     </Route>
     <Route path="*" element={<PageNotFound />} />
   </Routes>

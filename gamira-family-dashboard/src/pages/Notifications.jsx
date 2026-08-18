@@ -1,3 +1,4 @@
+import { useNavigate } from "react-router-dom";
 import React, { useCallback, useEffect, useState } from "react";
 import { AlertTriangle, Bell, BellRing, Check, Pill, ShieldAlert, Users } from "lucide-react";
 import { notifications as notificationsApi } from "@/api/gamiraClient";
@@ -14,6 +15,7 @@ const typeMeta = {
 };
 
 export default function Notifications() {
+  const navigate = useNavigate();
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -93,6 +95,19 @@ export default function Notifications() {
                   <p className="text-[11px] text-muted-foreground/80 mt-1">
                     {new Date(n.created_at).toLocaleString()} · {n.status}
                   </p>
+                  {/*
+                    A nudge to ring somebody arrives without its reasoning
+                    attached, which asks the reader to trust a judgement they
+                    cannot see. This is the way through to it.
+                  */}
+                  {n.type === "family_update" && (
+                    <button
+                      onClick={() => navigate("/gamira-noticed")}
+                      className="mt-1.5 text-[12px] font-semibold text-primary"
+                    >
+                      Why Gamira said this
+                    </button>
+                  )}
                 </div>
                 {!opened && (
                   <button

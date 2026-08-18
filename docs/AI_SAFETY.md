@@ -50,19 +50,47 @@ The arrow only ever points from the model towards the rules, never back:
 ### Requires explicit confirmation — implemented
 
 Confirmation means an accessible visual dialog **and** the same sentence spoken
-aloud. The wording is authored by the backend from the row it is about to change,
-so what is confirmed and what runs cannot differ:
+aloud, answerable either way. The wording is authored by the backend from the
+row it is about to change, so what is confirmed and what runs cannot differ:
 
 > Mark Metformin scheduled for 8:00 AM as taken?
 
+Always, however it came up:
+
 - `mark_dose_taken`
 - `mark_dose_skipped`
-- `complete_reminder`
 - `prepare_call_contact` — opens the dialer; the person still presses dial
 - `prepare_sos` — opens the real SOS screen; the person still presses it
 
-Tested by `test_ai_tools.py::test_a_mutation_asks_for_confirmation_naming_the_target`
-and `::test_rejecting_a_confirmation_changes_nothing`.
+Only when Gamira proposed it herself (`confirm_when_unasked`):
+
+- `create_reminder`
+- `complete_reminder`
+
+Asking for an everyday routine out loud *is* the consent for it, and a dialog in
+front of somebody's own request is a hurdle in front of their own words — worst
+for the person least able to clear it. Which case applies is decided by
+`tools.needs_confirmation`, in code, from a required `proposed_by` argument the
+model must state; anything but `"them"`, including its absence, confirms. The
+policy engine still runs first either way, so skipping the dialog never skips
+the permission check. Nothing clinical is decided this way: the four tools above
+set `requires_confirmation` and never reach that rule.
+
+**Answering.** The dialog is on screen with two large buttons, and a spoken
+"yes" or "no" does the same thing through `confirm_pending_action` /
+`cancel_pending_action`. Those two tools decide nothing: they carry an answer to
+a decision already in the database, whose action, arguments and wording were
+settled when it was raised. A decision id from any other session — including one
+of this person's own, from a conversation that has ended — is `not_found`.
+
+Tested by `test_ai_tools.py::test_a_mutation_asks_for_confirmation_naming_the_target`,
+`::test_rejecting_a_confirmation_changes_nothing`,
+`::test_a_reminder_they_asked_for_is_simply_added`,
+`::test_a_reminder_gamira_suggested_asks_first_and_names_it`,
+`::test_saying_yes_runs_the_action_that_was_read_out`,
+`::test_saying_no_changes_nothing`,
+`::test_saying_yes_twice_records_one_dose` and
+`::test_a_decision_from_another_session_cannot_be_confirmed`.
 
 ### Must not be performed at all — implemented as absence
 
@@ -77,6 +105,8 @@ There is no tool for any of these. Not a tool that refuses — no tool:
 - Add a family member
 - Reveal another user's or family's information
 - Make a purchase
+- Raise, escalate or close an alert — including the after-call review, which
+  can ask for a `family_update` notification and nothing else
 
 `test_ai_live.py::test_the_catalogue_exposes_no_general_purpose_tool` asserts the
 catalogue contains no name matching `http`, `fetch`, `url`, `sql`, `query`,
@@ -85,6 +115,111 @@ catalogue contains no name matching `http`, `fetch`, `url`, `sql`, `query`,
 Acknowledging, resolving or cancelling an alert with `ActorType.AI` raises
 `PermissionDenied` in `app/services/alerts.py` — not a configuration option, not
 a role, no code path.
+
+## Memory — implemented
+
+Gamira keeps a small number of ordinary things about somebody between
+conversations: who visits on Sundays, what they like being called. Written two
+ways — the `remember_this` tool during a conversation, and the after-call
+review — into `senior_memories`, and read back into the Live token's system
+instruction and `chat_context()`.
+
+Four limits, all structural:
+
+- **No clinical kind exists.** The enum is person, preference, routine,
+  interest, event (plus mood and concern, which only the review may write).
+  There is no symptom, no reading, no diagnosis, and the tool description
+  forbids them in as many words.
+- **The person sees all of it**, on their own device, in Settings → *What
+  Gamira remembers*, and the family sees the same list. Either can delete any
+  of it. A deleted memory leaves every prompt immediately and is never written
+  back, even if the same thing comes up again.
+- **There is no endpoint that creates one.** A note a person wrote has an
+  author and belongs in `family_notes`.
+- **Memories are notes, not instructions.** They are the one part of the system
+  instruction a previous conversation influenced, so they are fenced under a
+  heading that says so, capped in number and length, and whitespace-collapsed
+  before storage so one cannot forge a section of its own.
+
+## Noticing — implemented
+
+After a conversation ends, `ai.conversation_review` reads it back and may do
+three things: keep memories, write an `ai_summary` of kind `conversation`, and
+ask that the family be nudged to ring.
+
+The third is the one that needed care. The shipped persona says: *"You are not
+there to report on them; if something genuinely needs a family member, say so to
+them first, openly."* An observer that quietly messaged the family would
+contradict the instruction the model it is reading was running under. So the
+review must report `told_them`, and `app/ai/review.py::notify` refuses to send
+anything without it. What it sends is a `family_update` notification, never an
+alert, and with push off: a nudge to ring somebody is not an emergency and the
+two must not arrive looking alike.
+
+The schema is the rest of the limit. `ConversationReviewOut` has no severity, no
+risk score, no diagnosis and no free-form action — the only thing it can propose
+is an everyday reminder, which the family sees as a suggestion.
+
+## Acting — implemented
+
+The furthest Gamira goes on her own initiative is *proposing* an everyday
+routine she heard about. `app/ai/review.py::suggest_reminders` writes a
+`Reminder` with `status=suggested`, which every query for live reminders
+already excludes — so it prompts nobody, appears on no schedule and generates
+no notification until a family member accepts it. `type` is fixed to `other` in
+code and absent from the schema, so there is no path from a suggestion to a
+medication. `created_by_user_id` stays null and an audit line records
+`ActorType.AI`, so it can never be mistaken for something a person wrote. The
+reason and the source conversation travel with it, because a suggestion whose
+reasoning a family cannot inspect is one they can only guess at.
+
+Accepting it is the ordinary status change any family member could make by
+hand; dismissing it is the ordinary delete. Neither is a special AI path with
+its own permissions, and a viewer can do neither.
+
+Tested by `test_ai_suggestions.py::test_a_suggested_reminder_prompts_nobody_until_it_is_accepted`,
+`::test_a_suggestion_is_recorded_as_the_assistant_s_doing` and
+`::test_a_viewer_cannot_accept_a_suggestion`.
+
+## Quiet hours — implemented
+
+Nothing Gamira volunteers arrives in the middle of the night. Quiet hours are
+read in the *cared-for person's* timezone (a family scattered across timezones
+has no single night), and a notice raised inside them is held for the morning
+rather than dropped — the family should still hear about it. `held_until` in
+`app/ai/review.py` decides; `JobType.AI_FAMILY_NOTICE` carries it over, and
+sends it through the same `deliver_notice` the immediate path uses so a notice
+that waited overnight is not a slightly different notice.
+
+This is safe precisely because nothing she volunteers is urgent. The urgent
+path is an alert, and she cannot raise one.
+
+The Parent App applies the same courtesy to itself: `lib/useProactive.js` says
+nothing out loud outside 08:00–21:00 local, says each thing at most once a day,
+and never opens a microphone — it speaks through the device's own
+`speechSynthesis`. A session that started itself would mean the microphone
+turning on uninvited in somebody's home, which this app does not do.
+
+## Openness — implemented
+
+Whatever Gamira tells a family about somebody, that person can read.
+`GET /ai/seniors/{id}/family-notices` returns the notices word for word, one
+row per notice however many people it reached, and the Parent App shows them
+under Settings → *What your family was told*.
+
+The persona's promise is "say so to them first, openly", and openly has to
+survive the conversation ending: somebody should be able to check what was said
+about them without asking anybody. Tested by
+`test_ai_suggestions.py::test_the_person_can_read_what_was_sent_to_their_family`.
+
+## Retention — implemented
+
+`retention_policy="transcript_only"` is recorded on every conversation and is
+now enforced: the `ai.conversations.retention` cron deletes messages older than
+`conversation_retention_days` (30 by default) and marks the conversation
+`deleted`, so the sweep stays cheap however much history accumulates. The
+conversation row survives the deletion, because a conversation that was held and
+then cleared is a different thing from one that never happened.
 
 ## Structured output — implemented
 
@@ -234,7 +369,10 @@ enforcement is structural rather than textual:
 | A failing tool does not end the session | `test_ai_tools.py::test_one_failing_call_does_not_fail_the_batch_or_the_session` |
 | No error response leaks internals | `test_ai_tools.py::test_no_error_response_carries_a_traceback_or_internals` |
 | Ambiguous health question gets a limitation and an escalation | **Not automated.** The system instruction covers it and it has been tested by hand; a proper evaluation set is still owed. |
-| Conversation deletion follows a retention policy | **Not implemented.** `retention_policy` is recorded on every conversation; no deletion job runs yet. |
+| Conversation deletion follows a retention policy | `test_ai_retention.py`. The `ai.conversations.retention` cron deletes transcripts past `conversation_retention_days` and marks the conversation `deleted`. |
+| A memory is visible to the person it is about, and deletable | `test_ai_memory.py::test_deleting_a_memory_stops_it_reaching_the_model`, `::test_a_deleted_memory_does_not_come_back_on_its_own` |
+| The family is never told something the person was not told first | `test_ai_conversation_review.py::test_nothing_is_sent_when_gamira_said_nothing` |
+| A review never raises an alert | `test_ai_conversation_review.py::test_a_review_never_raises_an_alert` |
 
 ## Voice-specific controls — implemented
 
@@ -246,9 +384,12 @@ enforcement is structural rather than textual:
 - Concurrent-session and per-hour limits per user.
 - Every state-changing tool call goes through the Gamira backend.
 - Microphone state is visible, and it stops feeding the model while a tool call
-  is resolving or a confirmation dialog is open — otherwise the model hears the
-  room, takes another turn, and asks for the same thing again while the person is
-  still reading the first prompt.
+  is resolving. It keeps listening while a confirmation dialog is open, because
+  a spoken "yes" is the point of it — muting there meant the person answered
+  into a dead microphone and nothing happened until somebody touched the screen.
+  What the mute protected against, the model proposing the same thing twice, is
+  handled where it belongs: an identical request while one is still pending
+  returns the confirmation already open rather than raising a second.
 - Ending the session stops streaming and closes the backend session.
 - Every important action has a non-voice path. The red SOS button is unchanged
   and does not involve the AI at all.

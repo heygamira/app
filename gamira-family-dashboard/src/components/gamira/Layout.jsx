@@ -1,15 +1,29 @@
-import React from "react";
+import React, { useEffect } from "react";
 import { Outlet } from "react-router-dom";
 import TopNav from "./TopNav";
 import BottomNav from "./BottomNav";
 import SosAlertOverlay from "./SosAlertOverlay";
 import DeviceNoticeBanner from "./DeviceNoticeBanner";
 import { useAlerts } from "@/lib/useAlerts";
+import { unlockAlarm } from "@/lib/alarm";
 
 export default function Layout() {
   // One poll for both: an emergency and a flagged reading arrive down the same
   // notification list, and are told apart by what they are, not how they look.
   const { sos, notices, acknowledge } = useAlerts();
+
+  // Buy the right to make a sound at the first opportunity. A browser refuses
+  // audio until the page has been interacted with, and an SOS is precisely the
+  // moment nobody is going to interact first.
+  useEffect(() => {
+    const options = { once: true, capture: true };
+    window.addEventListener("pointerdown", unlockAlarm, options);
+    window.addEventListener("keydown", unlockAlarm, options);
+    return () => {
+      window.removeEventListener("pointerdown", unlockAlarm, options);
+      window.removeEventListener("keydown", unlockAlarm, options);
+    };
+  }, []);
 
   return (
     <div className="min-h-screen bg-background">

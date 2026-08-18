@@ -14,14 +14,17 @@ import uuid
 
 from sqlalchemy import func, select
 
+from app.ai.tools import get_tool, needs_confirmation
 from app.db.base import utcnow
 from app.models.ai import AiDecision
-from app.models.care import TimelineEvent
+from app.models.care import Reminder, TimelineEvent
 from app.models.enums import (
     ConfirmationState,
     DecisionStatus,
     DoseStatus,
     LiveSessionStatus,
+    ReminderStatus,
+    ReminderType,
     TimelineEventType,
 )
 from app.models.medication import DoseEvent
@@ -781,7 +784,14 @@ async def test_a_completed_reminder_is_recorded_once(client, session, run_worker
             client,
             session_id=live["session_id"],
             subject=subject,
-            calls=[call("complete_reminder", "fc-1", reminder_id=reminder_id)],
+            calls=[
+                call(
+                    "complete_reminder",
+                    "fc-1",
+                    proposed_by="gamira",
+                    reminder_id=reminder_id,
+                )
+            ],
         )
     )["results"][0]
     assert proposed["confirmation_prompt"] == "Mark Drink water as done?"
@@ -886,3 +896,430 @@ async def test_the_session_counts_its_tool_calls(client, session, run_worker):
     await session.refresh(row)
     assert row.tool_call_count == 2
     assert row.last_seen_at is not None
+
+
+# --------------------------------------------------------------------------- #
+# Adding a reminder by voice
+#
+# The line this has to hold: a reminder is an everyday routine, and a medication
+# is not. `docs/AI_SAFETY.md` lists adding or editing a medication among the
+# things there is deliberately no tool for, and adding one by talking to the
+# assistant must not become the exception.
+#
+# The second line, newer: asking for an everyday routine out loud *is* the
+# consent for it. A dialog in front of what somebody just asked for is a hurdle
+# in front of their own request, and the person least able to clear it is the
+# one this app is for. So `proposed_by` decides — and it decides nothing about
+# medicines, which are confirmed either way.
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_reminder_they_asked_for_is_simply_added(client, session):
+    family, subject = await _senior_session(client, session)
+    live = await start_live_session(client, subject=subject)
+
+    body = await call_tools(
+        client,
+        session_id=live["session_id"],
+        subject=subject,
+        calls=[
+            call(
+                "create_reminder",
+                "fc-1",
+                proposed_by="them",
+                title="water the plants",
+                local_time="16:30",
+            )
+        ],
+    )
+
+    result = body["results"][0]
+    assert result["ok"] is True
+    assert result["requires_confirmation"] is False
+    reminder = (await session.execute(select(Reminder))).scalar_one()
+    assert reminder.title == "water the plants"
+    assert reminder.local_time == "16:30"
+    # And the model is told what really exists, so it can say so.
+    assert result["response"]["reminder_id"] == str(reminder.id)
+
+
+async def test_a_reminder_gamira_suggested_asks_first_and_names_it(client, session):
+    family, subject = await _senior_session(client, session)
+    live = await start_live_session(client, subject=subject)
+
+    body = await call_tools(
+        client,
+        session_id=live["session_id"],
+        subject=subject,
+        calls=[
+            call(
+                "create_reminder",
+                "fc-1",
+                proposed_by="gamira",
+                title="water the plants",
+                local_time="16:30",
+            )
+        ],
+    )
+
+    result = body["results"][0]
+    assert result["requires_confirmation"] is True
+    assert result["confirmation_prompt"] == (
+        "Add a reminder to water the plants at 4:30 PM?"
+    )
+    # Nothing exists until a person says yes.
+    assert await session.scalar(select(func.count()).select_from(Reminder)) == 0
+
+
+async def test_an_unstated_proposer_is_treated_as_a_suggestion(client, session):
+    """Absent, or anything but "them", confirms. The default is the cautious one."""
+    family, subject = await _senior_session(client, session)
+    live = await start_live_session(client, subject=subject)
+
+    spec = get_tool("create_reminder")
+    assert needs_confirmation(spec, {}) is True
+    assert needs_confirmation(spec, {"proposed_by": "gamira"}) is True
+    assert needs_confirmation(spec, {"proposed_by": "them"}) is False
+
+    # And it is a required argument, so the model cannot quietly leave it out.
+    body = await call_tools(
+        client,
+        session_id=live["session_id"],
+        subject=subject,
+        calls=[call("create_reminder", "fc-1", title="tea", local_time="16:00")],
+    )
+    result = body["results"][0]
+    assert result["ok"] is False
+    assert result["response"]["error"] == "invalid_arguments"
+    assert await session.scalar(select(func.count()).select_from(Reminder)) == 0
+
+
+async def test_confirming_writes_the_reminder_against_the_verified_person(
+    client, session
+):
+    family, subject = await _senior_session(client, session)
+    live = await start_live_session(client, subject=subject)
+    proposed = (
+        await call_tools(
+            client,
+            session_id=live["session_id"],
+            subject=subject,
+            calls=[
+                call(
+                    "create_reminder",
+                    "fc-1",
+                    proposed_by="gamira",
+                    title="walk to the park",
+                    local_time="07:15",
+                    instructions="the short way round",
+                )
+            ],
+        )
+    )["results"][0]
+
+    confirmed = await client.post(
+        f"/api/v1/ai/actions/{proposed['decision_id']}/confirm", headers=auth(subject)
+    )
+    assert confirmed.status_code == 200
+    assert confirmed.json()["tool_response"]["status"] == "ok"
+
+    reminder = (await session.execute(select(Reminder))).scalar_one()
+    assert reminder.title == "walk to the park"
+    assert reminder.local_time == "07:15"
+    assert reminder.instructions == "the short way round"
+    assert reminder.status is ReminderStatus.ACTIVE
+    # From the session's verified scope, never from anything that was said.
+    assert str(reminder.senior_profile_id) == family.senior_id
+    assert reminder.timezone == "Asia/Kolkata"
+    # Never a medication, whatever it was called.
+    assert reminder.type is ReminderType.OTHER
+
+
+async def test_a_reminder_cannot_smuggle_in_a_medication_type(client, session):
+    """`type` is not an argument at all, so there is nothing to smuggle it in."""
+    family, subject = await _senior_session(client, session)
+    live = await start_live_session(client, subject=subject)
+
+    body = await call_tools(
+        client,
+        session_id=live["session_id"],
+        subject=subject,
+        calls=[
+            call(
+                "create_reminder",
+                "fc-1",
+                proposed_by="them",
+                title="Metformin",
+                local_time="08:00",
+                type="medication",
+            )
+        ],
+    )
+
+    result = body["results"][0]
+    assert result["ok"] is False
+    assert result["response"]["error"] == "invalid_arguments"
+    assert result["response"]["reason"] == "unexpected_property"
+
+
+async def test_a_time_that_is_not_a_time_is_refused(client, session):
+    """Without a pattern check this reached the database as a 500-char string."""
+    family, subject = await _senior_session(client, session)
+    live = await start_live_session(client, subject=subject)
+
+    for bad in ("half four", "25:00", "7:15", "07:15:00", ""):
+        body = await call_tools(
+            client,
+            session_id=live["session_id"],
+            subject=subject,
+            calls=[
+                call(
+                    "create_reminder",
+                    f"fc-{bad}",
+                    proposed_by="them",
+                    title="tea",
+                    local_time=bad,
+                )
+            ],
+        )
+        result = body["results"][0]
+        assert result["ok"] is False, f"{bad!r} was accepted"
+        assert result["response"]["error"] == "invalid_arguments"
+        # The rejected value never comes back — it is model output.
+        assert bad not in str(result["response"]) or bad == ""
+
+    assert await session.scalar(select(func.count()).select_from(Reminder)) == 0
+
+
+async def test_a_viewer_who_is_not_the_person_cannot_add_a_reminder(client, session):
+    """Same rule as recording somebody else's dose.
+
+    Note the ``proposed_by="them"`` — the path that skips the dialog. Skipping
+    the *confirmation* never skips the *permission*: the policy engine runs
+    first either way, and it is the only thing deciding who may write.
+    """
+    family = await create_family(client)
+    await join(client, family, subject="a-viewer", role="viewer")
+    live = await client.post(
+        "/api/v1/ai/live-sessions",
+        json={"senior_id": family.senior_id},
+        headers=auth("a-viewer"),
+    )
+    assert live.status_code == 201
+
+    body = await call_tools(
+        client,
+        session_id=live.json()["session_id"],
+        subject="a-viewer",
+        calls=[
+            call(
+                "create_reminder",
+                "fc-1",
+                proposed_by="them",
+                title="tea",
+                local_time="16:00",
+            )
+        ],
+    )
+
+    result = body["results"][0]
+    assert result["ok"] is False
+    assert result["response"]["error"] == "permission_denied"
+    assert await session.scalar(select(func.count()).select_from(Reminder)) == 0
+
+
+# --------------------------------------------------------------------------- #
+# Answering a confirmation out loud
+#
+# The dialog stays — `docs/AI_SAFETY.md` promises a visible, tappable one, and
+# it is also the fallback when speech is not understood. What these two tools
+# add is that "yes" is worth as much as a tap, for somebody who cannot reliably
+# reach a phone. They decide nothing themselves: the action and its wording were
+# settled when the confirmation was raised.
+# --------------------------------------------------------------------------- #
+
+
+async def _pending_dose_confirmation(client, session, run_worker):
+    """A dose confirmation waiting on an answer, in an open session."""
+    family, subject = await _senior_session(client, session)
+    await run_worker()
+    dose = (await list_doses(client, family, actor=subject))[0]
+    live = await start_live_session(client, subject=subject)
+    proposed = (
+        await call_tools(
+            client,
+            session_id=live["session_id"],
+            subject=subject,
+            calls=[call("mark_dose_taken", "fc-1", dose_event_id=dose["id"])],
+        )
+    )["results"][0]
+    assert proposed["requires_confirmation"] is True
+    return family, subject, live, dose, proposed["decision_id"]
+
+
+async def test_saying_yes_runs_the_action_that_was_read_out(
+    client, session, run_worker
+):
+    family, subject, live, dose, decision_id = await _pending_dose_confirmation(
+        client, session, run_worker
+    )
+
+    body = await call_tools(
+        client,
+        session_id=live["session_id"],
+        subject=subject,
+        calls=[call("confirm_pending_action", "fc-2", decision_id=decision_id)],
+    )
+
+    result = body["results"][0]
+    assert result["ok"] is True
+    # The persisted outcome of the *underlying* action, so the model can only
+    # say a dose was recorded once a dose really was.
+    assert result["response"]["recorded_status"] == "taken"
+    assert result["response"]["resolved_decision_id"] == decision_id
+
+    event = await session.get(DoseEvent, uuid.UUID(dose["id"]))
+    await session.refresh(event)
+    assert event.status is DoseStatus.TAKEN
+
+    decision = await session.get(AiDecision, uuid.UUID(decision_id))
+    await session.refresh(decision)
+    assert decision.confirmation_state is ConfirmationState.CONFIRMED
+    assert decision.status is DecisionStatus.EXECUTED
+
+
+async def test_saying_no_changes_nothing(client, session, run_worker):
+    family, subject, live, dose, decision_id = await _pending_dose_confirmation(
+        client, session, run_worker
+    )
+
+    body = await call_tools(
+        client,
+        session_id=live["session_id"],
+        subject=subject,
+        calls=[call("cancel_pending_action", "fc-2", decision_id=decision_id)],
+    )
+
+    assert body["results"][0]["response"]["outcome"] == "cancelled"
+
+    event = await session.get(DoseEvent, uuid.UUID(dose["id"]))
+    await session.refresh(event)
+    assert event.status is DoseStatus.DUE
+
+    decision = await session.get(AiDecision, uuid.UUID(decision_id))
+    await session.refresh(decision)
+    assert decision.confirmation_state is ConfirmationState.REJECTED
+    assert decision.status is DecisionStatus.REJECTED
+
+
+async def test_saying_yes_twice_records_one_dose(client, session, run_worker):
+    """Spoken and tapped can race. Whichever lands second must do nothing."""
+    family, subject, live, dose, decision_id = await _pending_dose_confirmation(
+        client, session, run_worker
+    )
+
+    for call_id in ("fc-2", "fc-3"):
+        body = await call_tools(
+            client,
+            session_id=live["session_id"],
+            subject=subject,
+            calls=[call("confirm_pending_action", call_id, decision_id=decision_id)],
+        )
+        assert body["results"][0]["response"].get("error") != "action_failed"
+
+    taken = await session.scalar(
+        select(func.count())
+        .select_from(TimelineEvent)
+        .where(TimelineEvent.type == TimelineEventType.MEDICATION_TAKEN)
+    )
+    assert taken == 1
+
+
+async def test_a_decision_from_another_session_cannot_be_confirmed(
+    client, session, run_worker
+):
+    """Even this person's own, from a conversation that has ended.
+
+    The model may only answer a question it was asked in *this* conversation.
+    An id it kept, guessed, or was read out to it goes nowhere.
+    """
+    family, subject, first, dose, decision_id = await _pending_dose_confirmation(
+        client, session, run_worker
+    )
+    second = await start_live_session(client, subject=subject)
+
+    body = await call_tools(
+        client,
+        session_id=second["session_id"],
+        subject=subject,
+        calls=[call("confirm_pending_action", "fc-2", decision_id=decision_id)],
+    )
+
+    result = body["results"][0]
+    assert result["ok"] is False
+    assert result["response"]["error"] == "not_found"
+
+    event = await session.get(DoseEvent, uuid.UUID(dose["id"]))
+    await session.refresh(event)
+    assert event.status is DoseStatus.DUE
+
+
+async def test_an_invented_decision_id_confirms_nothing(client, session, run_worker):
+    family, subject = await _senior_session(client, session)
+    live = await start_live_session(client, subject=subject)
+
+    body = await call_tools(
+        client,
+        session_id=live["session_id"],
+        subject=subject,
+        calls=[
+            call("confirm_pending_action", "fc-1", decision_id=str(uuid.uuid4())),
+            call("confirm_pending_action", "fc-2", decision_id="not-a-uuid"),
+        ],
+    )
+
+    assert body["results"][0]["response"]["error"] == "not_found"
+    assert body["results"][1]["response"]["error"] == "invalid_arguments"
+
+
+async def test_asking_twice_while_it_is_still_on_screen_shows_one_dialog(
+    client, session, run_worker
+):
+    """A model that asked, heard nothing, and tried again with a new call id.
+
+    Without this the person answers two dialogs for one thing — and the second
+    would still be sitting there, unanswerable, after they dealt with the first.
+    """
+    family, subject = await _senior_session(client, session)
+    live = await start_live_session(client, subject=subject)
+    arguments = {
+        "proposed_by": "gamira",
+        "title": "water the plants",
+        "local_time": "16:30",
+    }
+
+    first = (
+        await call_tools(
+            client,
+            session_id=live["session_id"],
+            subject=subject,
+            calls=[call("create_reminder", "fc-1", **arguments)],
+        )
+    )["results"][0]
+    second = (
+        await call_tools(
+            client,
+            session_id=live["session_id"],
+            subject=subject,
+            calls=[call("create_reminder", "fc-2", **arguments)],
+        )
+    )["results"][0]
+
+    assert second["requires_confirmation"] is True
+    assert second["decision_id"] == first["decision_id"]
+    pending = await session.scalar(
+        select(func.count())
+        .select_from(AiDecision)
+        .where(AiDecision.confirmation_state == ConfirmationState.PENDING)
+    )
+    assert pending == 1

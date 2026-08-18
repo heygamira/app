@@ -45,6 +45,7 @@ const storage = {
  * @property {unknown} [body]
  * @property {string} [idempotencyKey]
  * @property {AbortSignal} [signal]
+ * @property {boolean} [keepalive] let the request outlive the page that sent it
  */
 
 /**
@@ -52,7 +53,10 @@ const storage = {
  * @param {RequestOptions} [options]
  * @returns {Promise<any>}
  */
-async function request(path, { method = 'GET', body, idempotencyKey, signal } = {}) {
+async function request(
+  path,
+  { method = 'GET', body, idempotencyKey, signal, keepalive = false } = {},
+) {
   const token = storage.get();
   const headers = { Accept: 'application/json' };
   if (body !== undefined) headers['Content-Type'] = 'application/json';
@@ -65,6 +69,9 @@ async function request(path, { method = 'GET', body, idempotencyKey, signal } = 
       method,
       headers,
       signal,
+      // `keepalive` lets a request outlive the page that started it, which is
+      // the only way a request sent while closing a tab actually goes out.
+      keepalive,
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch (cause) {
@@ -336,8 +343,38 @@ export const ai = {
   promoteLiveSession: (sessionId) =>
     request(`/ai/live-sessions/${sessionId}/promote`, { method: 'POST' }),
 
+  /**
+   * Keep what was said in a voice conversation.
+   *
+   * Batched by the caller, so this is a request every few seconds rather than
+   * one per fragment. `final` marks the flush that happens as the session ends,
+   * which needs `keepalive` for the same reason the close does — a request
+   * started while a page is going away is otherwise cancelled.
+   *
+   * @param {string} sessionId
+   * @param {Array<{role: string, text: string}>} turns
+   * @param {{final?: boolean}} [options]
+   */
+  storeTranscript: (sessionId, turns, { final = false } = {}) =>
+    request(`/ai/live-sessions/${sessionId}/transcript`, {
+      method: 'POST',
+      body: { turns },
+      keepalive: final,
+    }),
+
+  /**
+   * Release a session's slot. Idempotent, and safe to fire while unloading.
+   *
+   * `keepalive` matters here: only two sessions may be open at once, and a
+   * close that is cancelled because the tab went away leaves one of those two
+   * slots held for the full half hour — which locks the microphone out of the
+   * next visit.
+   */
   closeLiveSession: (sessionId) =>
-    request(`/ai/live-sessions/${sessionId}/close`, { method: 'POST' }),
+    request(`/ai/live-sessions/${sessionId}/close`, {
+      method: 'POST',
+      keepalive: true,
+    }),
 
   /**
    * Forward one Live message's function calls for the backend to run.
@@ -361,6 +398,28 @@ export const ai = {
   rejectAction: (decisionId) =>
     request(`/ai/actions/${decisionId}/reject`, { method: 'POST' }),
   getAction: (decisionId) => request(`/ai/actions/${decisionId}`),
+
+  /**
+   * What Gamira remembers about this person.
+   *
+   * Shown to them on their own device, because a companion that keeps notes
+   * about somebody they cannot read is a different and worse thing. There is
+   * no create: memories are Gamira's, and anything a person wrote themselves
+   * is a note with an author.
+   */
+  listMemories: (seniorId) => request(`/ai/seniors/${seniorId}/memories`),
+
+  /**
+   * What Gamira has told this person's family about them.
+   *
+   * She says it to them first — the backend refuses to send anything she did
+   * not mention out loud — and this is how "openly" survives the conversation
+   * ending. One row per notice, however many people it reached.
+   */
+  listFamilyNotices: (seniorId) =>
+    request(`/ai/seniors/${seniorId}/family-notices`),
+  forgetMemory: (memoryId) =>
+    request(`/ai/memories/${memoryId}`, { method: 'DELETE' }),
 
   requestSummary: (seniorId, range = {}) =>
     request('/ai/summaries', {

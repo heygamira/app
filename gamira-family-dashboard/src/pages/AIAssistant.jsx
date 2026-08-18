@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Send } from "lucide-react";
 import { useAuth } from "@/lib/AuthContext";
+import { ai as aiApi } from "@/api/gamiraClient";
 import { dosesApi, healthApi, medicinesApi, timelineApi, toMember } from "@/api/dashboardData";
 import { OPEN_DOSE_STATUSES } from "@/lib/careStatus";
 import PageHeader from "@/components/gamira/PageHeader";
@@ -16,14 +17,15 @@ const OPENING =
   "Ask about today and I will answer from the records. I only count what has been entered — I do not interpret readings or give medical advice.";
 
 /**
- * Ask about today.
+ * Answer from the loaded records, without a model.
  *
- * Designed as a chat with a hosted model. It answers from the family's own
- * records instead: a wrong answer about whether a dose was taken is not a
- * cosmetic failure, and there is no backend AI layer yet. When one exists it
- * will sit on top of these same figures, with the same permission checks.
+ * This is the fallback, not the main path — `POST /ai/chat` is. It exists
+ * because a wrong answer about whether a dose was taken is not a cosmetic
+ * failure: when the assistant is unavailable this screen still says what is
+ * due and what was missed, from the same figures the model would have been
+ * given, and says plainly that it is doing so.
  */
-function answer(question, data) {
+function answerFromRecords(question, data) {
   const q = question.toLowerCase();
   const { doses, medicines, readings, events } = data;
 
@@ -81,7 +83,7 @@ function answer(question, data) {
       .join("; ")}.`;
   }
 
-  return "I can answer what is due, what was missed, which medicines are active, the latest readings, and what has happened recently. A conversational assistant needs the backend AI layer, which is not built yet.";
+  return "I can answer what is due, what was missed, which medicines are active, the latest readings, and what has happened recently.";
 }
 
 export default function AIAssistant() {
@@ -93,7 +95,20 @@ export default function AIAssistant() {
   const [messages, setMessages] = useState([{ role: "assistant", text: OPENING }]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(true);
+  const [thinking, setThinking] = useState(false);
+  // The backend scopes a conversation to one person and checks every answer
+  // against that membership, so the question has to be about somebody in
+  // particular rather than about the family in general.
+  const [subjectId, setSubjectId] = useState(null);
+  // Threading. Passing this back lets the model see what was already asked.
+  const conversationRef = useRef(null);
   const endRef = useRef(null);
+
+  const subject = members.find((m) => m.id === subjectId) || members[0] || null;
+
+  useEffect(() => {
+    if (!subjectId && members.length) setSubjectId(members[0].id);
+  }, [memberKey, subjectId, members]);
 
   const load = useCallback(async () => {
     if (!members.length) {
@@ -124,20 +139,76 @@ export default function AIAssistant() {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  const send = (text) => {
+  const send = async (text) => {
     const question = text.trim();
-    if (!question || loading) return;
+    if (!question || loading || thinking) return;
     setInput("");
-    setMessages((prev) => [
-      ...prev,
-      { role: "user", text: question },
-      { role: "assistant", text: answer(question, data) },
-    ]);
+    setMessages((prev) => [...prev, { role: "user", text: question }]);
+
+    if (!subject) {
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", text: "There is nobody in this family to answer about yet." },
+      ]);
+      return;
+    }
+
+    setThinking(true);
+    try {
+      const response = await aiApi.chat({
+        seniorId: subject.id,
+        message: question,
+        conversationId: conversationRef.current,
+      });
+      conversationRef.current = response.conversation_id;
+      setMessages((prev) => [...prev, { role: "assistant", text: response.reply }]);
+    } catch (err) {
+      // The assistant being down must not take the screen with it. Answer from
+      // the records that are already loaded, and say that is what happened —
+      // quietly degrading would leave somebody unsure which they had read.
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          text: answerFromRecords(question, data),
+          note:
+            err.code === "network_unavailable"
+              ? "Answered from the records on this device — Gamira could not be reached."
+              : "Answered from the records — the assistant is unavailable right now.",
+        },
+      ]);
+    } finally {
+      setThinking(false);
+    }
   };
 
   return (
     <div className="flex flex-col h-[calc(100vh-9rem)]">
       <PageHeader title="Ask about today" subtitle="Answered from your family's records" backTo="/" />
+
+      {members.length > 1 && (
+        <div className="flex gap-2 overflow-x-auto no-scrollbar pb-3">
+          {members.map((m) => (
+            <button
+              key={m.id}
+              onClick={() => {
+                setSubjectId(m.id);
+                // A new subject is a new conversation: the backend scopes every
+                // answer to one person's record and must not be handed a thread
+                // that was about somebody else.
+                conversationRef.current = null;
+              }}
+              className={`px-3 py-1.5 rounded-full border text-[12px] font-medium whitespace-nowrap shrink-0 ${
+                subject?.id === m.id
+                  ? "bg-primary text-primary-foreground border-primary"
+                  : "bg-white text-foreground border-border"
+              }`}
+            >
+              {m.name}
+            </button>
+          ))}
+        </div>
+      )}
 
       <div className="flex-1 overflow-y-auto space-y-3 pb-4 no-scrollbar">
         {messages.map((m, i) => (
@@ -150,9 +221,29 @@ export default function AIAssistant() {
               }`}
             >
               {m.text}
+              {m.note && (
+                <p className="mt-1.5 pt-1.5 border-t border-border text-[11px] text-muted-foreground">
+                  {m.note}
+                </p>
+              )}
             </div>
           </div>
         ))}
+        {thinking && (
+          <div className="flex justify-start">
+            <div className="px-4 py-2.5 rounded-2xl rounded-bl-md bg-white border border-border shadow-soft">
+              <span className="flex gap-1" aria-label="Gamira is answering">
+                {[0, 1, 2].map((d) => (
+                  <span
+                    key={d}
+                    className="w-1.5 h-1.5 rounded-full bg-muted-foreground/60 animate-bounce"
+                    style={{ animationDelay: `${d * 0.15}s` }}
+                  />
+                ))}
+              </span>
+            </div>
+          </div>
+        )}
         <div ref={endRef} />
       </div>
 
@@ -173,13 +264,19 @@ export default function AIAssistant() {
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && send(input)}
-          placeholder={loading ? "Loading records…" : "Ask about today"}
+          placeholder={
+            loading
+              ? "Loading records…"
+              : subject && members.length > 1
+                ? `Ask about ${subject.name}`
+                : "Ask about today"
+          }
           disabled={loading}
           className="flex-1 px-4 py-3 rounded-2xl bg-white border border-border text-[14px] focus:outline-none focus:ring-2 focus:ring-primary/30 disabled:opacity-60"
         />
         <button
           onClick={() => send(input)}
-          disabled={loading || !input.trim()}
+          disabled={loading || thinking || !input.trim()}
           className="w-11 h-11 rounded-2xl bg-primary flex items-center justify-center disabled:opacity-50 shrink-0"
           aria-label="Send"
         >

@@ -12,9 +12,11 @@ import {
   LifeBuoy,
   Lock,
   LogOut,
+  MessageCircle,
   Pill,
   Settings,
   ShieldAlert,
+  Sparkles,
 } from "lucide-react";
 import { useAuth } from "@/lib/AuthContext";
 
@@ -27,6 +29,11 @@ const MODULES = [
   { label: "Medication", path: "/medication", icon: Pill },
   { label: "Timeline", path: "/timeline", icon: Clock },
   { label: "Ask about today", path: "/ai-assistant", icon: Brain },
+  // Where the family can read — and remove — what Gamira has picked up.
+  { label: "What Gamira remembers", path: "/gamira-memory", icon: Sparkles },
+  // The reasoning behind a "might like a call" nudge. Without it the
+  // notification asks a family to trust a judgement they cannot inspect.
+  { label: "What Gamira noticed", path: "/gamira-noticed", icon: MessageCircle },
   { label: "Reports", path: "/reports", icon: FileText },
   { label: "Emergency", path: "/emergency", icon: ShieldAlert },
   { label: "Smart Home", path: "/smart-home", icon: Home },

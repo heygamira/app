@@ -15,6 +15,9 @@ difference is stated. `alembic/versions/` is authoritative:
 | `0003` | `registered_devices`, `notification_delivery_attempts`, notification `channel`, timeline `dedupe_key` |
 | `0004` | `alerts`, `alert_events` |
 | `0005` | `conversations`, `conversation_messages`, `ai_summaries`, `live_sessions`, `ai_decisions`, `ai_usage` |
+| `0006` | `live_sessions.provisional` |
+| `0007` | `senior_memories` |
+| `0008` | `reminders.suggestion_reason`, `reminders.suggested_from_conversation_id` |
 
 ## Common conventions
 
@@ -390,6 +393,34 @@ conversation. `kind` distinguishes them and `conversation_id` is nullable.
 The provenance columns are the point. A summary without its date range, its
 source figures, its prompt version and its freshness warning is a paragraph of
 unattributable text about somebody's health.
+
+### senior_memories
+
+The small set of ordinary things Gamira remembers about somebody between
+conversations - who visits on Sundays, that they would rather not be rung before
+nine. Its own table rather than a column on `senior_profiles`, because `notes`
+and `family_notes` are written by people and merging model output into them
+would destroy the "who said this" property the rest of the schema keeps.
+
+- `id`, `family_id`, `senior_profile_id`
+- `kind` - person, preference, routine, interest, event, mood, concern. There is
+  deliberately no clinical kind: a memory is never a symptom, a reading or a
+  diagnosis, and the tool Gamira calls mid-conversation cannot even name the
+  last two.
+- `content` - one short sentence, whitespace-collapsed, capped at 400 characters
+- `source_conversation_id` - which exchange it came out of
+- `confidence` - recorded and shown; never used to decide anything on its own
+- `dedupe_key` - unique. The same thing said twice is one memory.
+- `model`, `provider`, `prompt_version`, `output_schema_version`
+- `review_state`, `superseded_by_id`
+- `deleted_at`, `deleted_by_user_id` - soft, so "why did Gamira say that?" stays
+  answerable, and filtered out of every prompt immediately
+
+Written two ways: the `remember_this` tool during a conversation, and the
+after-call review. Read into the Live token's system instruction and into
+`chat_context()`. Shown to the person on their own device and to their family in
+the dashboard, and either can delete any of it - which is the condition on which
+keeping it is reasonable at all.
 
 ### live_sessions
 

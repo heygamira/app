@@ -48,9 +48,12 @@ class Prompt:
         return self.template.format(**variables)
 
 
+# v2 adds the conversation figures. A new version rather than an edit in place:
+# a summary written last month has to stay explicable by the instructions that
+# actually produced it, and those instructions said nothing about moods.
 WEEKLY_SUMMARY_V1 = Prompt(
     name="weekly_care_summary",
-    version="1",
+    version="2",
     system=SAFETY_PREAMBLE
     + """
 Your task is to turn a week of counted figures into two or three warm, plain
@@ -63,6 +66,13 @@ whether the week was good or bad — report it.
 
 If the data is thin or stale, say so plainly in the body rather than writing
 around it.
+
+The `conversation` figures are how often Gamira and this person talked, and the
+single plain word each of those conversations was recorded as sounding like.
+Mention them the way you would mention anything else counted here — "you spoke
+four times this week, mostly cheerful". Never turn a mood tally into a
+diagnosis, a trend, a warning or a suggestion that anybody do anything about
+it, and never repeat a concern line as though you observed it yourself.
 
 Return JSON matching the given schema and nothing else.
 """,
@@ -110,9 +120,54 @@ Question: {question}
 )
 
 
+CONVERSATION_REVIEW_V1 = Prompt(
+    name="conversation_review",
+    version="1",
+    system=SAFETY_PREAMBLE
+    + """
+You are reading back one finished conversation between Gamira and an older
+adult, to decide two things: what is worth remembering about them, and whether
+their family should be nudged to ring.
+
+What to remember: small, ordinary, durable things about their life. Who visits
+and when. What they like being called. That they walk before breakfast. That
+their grandson sits exams in June. Not what happened in this one conversation,
+not anything medical, and nothing you would be uncomfortable with them reading
+— they can see all of it and delete any of it.
+
+Mood is one plain word about how the conversation sounded, and it is an
+impression, not a finding. "Flat" is not depression. "Unwell" means they said
+they felt unwell, not that they are. Use "unclear" freely; a short exchange
+about the weather tells you nothing.
+
+Ask for the family only when something would genuinely be better for a phone
+call from somebody who loves them — sounding lonely, missing a person, an
+anniversary coming up, a week of very short conversations. Not for a bad
+night's sleep, not for a missed dose, and never as a way of reporting on them.
+
+Set told_them to true only if Gamira actually said in this conversation that
+she would mention it. If she did not, set notify_family to false: telling the
+family something the person was not told about is not something you may do.
+
+Return JSON matching the given schema and nothing else.
+""",
+    template="""\
+Person: {senior_name}
+When: {when} ({timezone})
+
+What Gamira already remembers about them:
+{memories_json}
+
+The conversation, in order:
+{transcript}
+""",
+)
+
+
 REGISTRY: dict[str, Prompt] = {
     WEEKLY_SUMMARY_V1.name: WEEKLY_SUMMARY_V1,
     CHAT_REPLY_V1.name: CHAT_REPLY_V1,
+    CONVERSATION_REVIEW_V1.name: CONVERSATION_REVIEW_V1,
 }
 
 
@@ -133,6 +188,7 @@ def get_prompt(name: str, version: str | None = None) -> Prompt:
 
 __all__ = [
     "CHAT_REPLY_V1",
+    "CONVERSATION_REVIEW_V1",
     "REGISTRY",
     "SAFETY_PREAMBLE",
     "WEEKLY_SUMMARY_V1",

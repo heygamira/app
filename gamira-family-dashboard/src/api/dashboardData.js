@@ -311,6 +311,10 @@ export function toReminder(reminder, memberName) {
     time: reminder.local_time || '',
     days_of_week: reminder.days_of_week || '',
     status: reminder.status,
+    // Set only on a reminder Gamira proposed from something she heard. The
+    // reason travels with it because a suggestion whose reasoning is invisible
+    // is one a family can only guess at, and guessing is not consent.
+    suggestion_reason: reminder.suggestion_reason || '',
     family_member_id: reminder.senior_profile_id,
     family_member_name: memberName || '',
     created_date: reminder.created_at,
