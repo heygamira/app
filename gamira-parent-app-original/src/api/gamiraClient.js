@@ -158,6 +158,12 @@ export const seniors = {
   update: (seniorId, patch) =>
     request(`/seniors/${seniorId}`, { method: 'PATCH', body: patch }),
   archive: (seniorId) => request(`/seniors/${seniorId}`, { method: 'DELETE' }),
+  /**
+   * Today's doses, active reminders, emergency contacts and pending
+   * wellbeing checks, in one request. What VoiceContext polls instead of
+   * the four endpoints above separately.
+   */
+  summary: (seniorId) => request(`/seniors/${seniorId}/summary`),
 };
 
 export const medications = {

@@ -4,9 +4,9 @@ import { useGeminiVoice } from '@/lib/useGeminiVoice';
 import { useWakeWord } from '@/lib/useWakeWord';
 import { useProactive } from '@/lib/useProactive';
 import { useWatchRelay } from '@/lib/useWatchRelay';
-import { useSeniorCare } from '@/lib/useSeniorCare';
+import { useAuth } from '@/lib/AuthContext';
 import { langCode, useI18n } from '@/lib/i18n';
-import { wellbeingChecks as checksApi } from '@/api/gamiraClient';
+import { seniors as seniorsApi, wellbeingChecks as checksApi } from '@/api/gamiraClient';
 import VoiceConfirmDialog from '@/components/gamira/VoiceConfirmDialog';
 
 /**
@@ -35,16 +35,16 @@ const VoiceContext = createContext(null);
 // enough to answer a question, short enough that a phone left on a table is
 // not streaming a room to anybody.
 const PROACTIVE_LISTEN_SECONDS = 20;
-// How often to look for a question a watch flag has left owed.
-const CHECK_POLL_MS = 30_000;
-// How often to re-read doses and reminders. Without this, a dose or reminder
-// created after this screen loaded — including the ordinary ones a backend
-// sweep creates through the day — never appears here until something else
-// happens to reload the page, so a schedule item could come and go due without
-// this device ever finding out. Wellbeing checks already poll on their own
-// timer above; this is the same idea for the data a proactive nudge is judged
-// against.
-const CARE_POLL_MS = 5_000;
+// A safety net, not the primary refresh path: a foreground FCM push already
+// calls reload() (see usePushRegistration), and so does returning to this tab
+// (the visibilitychange listener below). This just bounds how stale the
+// screen can get if both of those miss — a dose or reminder created
+// elsewhere, or a watch flag raised while this device was asleep, still
+// appears within a minute rather than only "eventually." It used to be 5
+// seconds, polling doses, reminders and contacts separately every tick
+// (~36 requests/minute per open app) plus a second 30-second poll for
+// wellbeing checks; both are now one request on this one timer.
+const SAFETY_POLL_MS = 60_000;
 
 export function useVoice() {
   const value = useContext(VoiceContext);
@@ -56,18 +56,73 @@ export function useVoice() {
 
 export default function VoiceProvider() {
   const { lang } = useI18n();
-  const { self, seniorId, doses, reminders, contacts, loading, error, reload } =
-    useSeniorCare({ doses: true, reminders: true, contacts: true, refreshMs: CARE_POLL_MS });
+  const { self } = useAuth();
+  const seniorId = self?.id;
+
+  const [doses, setDoses] = useState([]);
+  const [reminders, setReminders] = useState([]);
+  const [contacts, setContacts] = useState([]);
+  const [wellbeingChecks, setWellbeingChecks] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  // The one request behind doses, reminders, contacts and pending wellbeing
+  // checks — see GET /seniors/{id}/summary. A background refresh must not
+  // blank the screen the person is reading.
+  const reload = useCallback(
+    async ({ quiet = false } = {}) => {
+      if (!seniorId) {
+        setLoading(false);
+        return;
+      }
+      if (!quiet) setLoading(true);
+      try {
+        const s = await seniorsApi.summary(seniorId);
+        setDoses(s.doses);
+        setReminders(s.reminders);
+        setContacts(s.emergency_contacts);
+        setWellbeingChecks(s.wellbeing_checks);
+        setError(null);
+      } catch (e) {
+        setError(e.message);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [seniorId]
+  );
+
+  useEffect(() => {
+    reload();
+  }, [reload]);
+
+  useEffect(() => {
+    if (!seniorId) return undefined;
+    const timer = setInterval(() => reload({ quiet: true }), SAFETY_POLL_MS);
+    return () => clearInterval(timer);
+  }, [reload, seniorId]);
+
+  // Catches what the 60-second safety poll otherwise would not until its next
+  // tick: a phone put down and picked back up, or switched away from and
+  // back to. The same reload() a foreground push already calls.
+  useEffect(() => {
+    if (!seniorId) return undefined;
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') reload({ quiet: true });
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [reload, seniorId]);
 
   // This senior's paired watch, if any, reaches the server only through this
   // app — never on its own. See useWatchRelay for why.
   //
   // `onMutation` has to be a stable reference. An inline arrow here is a new
-  // function every render, and `useSeniorCare`'s own 5-second poll re-renders
-  // this provider that often — so the hook's 30-second reading-flush timer
-  // never survived that long: its effect kept tearing down and restarting on
-  // every render, always mid-count. Readings piled up in the relay's mailbox,
-  // ingested but never actually flushed to the backend.
+  // function every render, and re-renders are frequent enough (voice status
+  // changes, the safety poll above) that the hook's 30-second reading-flush
+  // timer would otherwise keep tearing down and restarting, always mid-count.
+  // Readings piled up in the relay's mailbox, ingested but never actually
+  // flushed to the backend.
   const onWatchRelayMutation = useCallback(() => reload({ quiet: true }), [reload]);
   useWatchRelay({
     seniorId,
@@ -90,8 +145,14 @@ export default function VoiceProvider() {
   const wakeSoundRef = useRef(null);
 
   // A question a watch flag left owed, and the one currently being asked.
+  // Tracked as its own state (not read straight from wellbeingChecks) so
+  // answering one can clear it immediately rather than waiting for the next
+  // reload to confirm the list changed server-side.
   const [pendingCheck, setPendingCheck] = useState(null);
   const askedCheckRef = useRef(null);
+  useEffect(() => {
+    setPendingCheck(wellbeingChecks[0] || null);
+  }, [wellbeingChecks]);
 
   const dialContact = useCallback((contactId) => {
     const contact = contactsRef.current.find((c) => c.id === contactId);
@@ -245,29 +306,9 @@ export default function VoiceProvider() {
     return () => clearTimeout(timer);
   }, [nudge, active, status, dismissNudge]);
 
-  // A watch flagged one of their readings, so there is a question owed. The
-  // backend tells the family if nobody answers; asking is this app's half.
-  useEffect(() => {
-    if (!seniorId) return undefined;
-    let cancelled = false;
-    const look = async () => {
-      try {
-        const rows = await checksApi.list(seniorId);
-        if (!cancelled) setPendingCheck(rows[0] || null);
-      } catch {
-        // A poll that fails is not worth a message on this screen: the
-        // escalation happens on the backend whether or not this app is
-        // reachable, which is the whole reason it lives there.
-      }
-    };
-    look();
-    const timer = setInterval(look, CHECK_POLL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [seniorId]);
-
+  // A watch flagged one of their readings, so there is a question owed —
+  // sourced from the same summary reload as everything else above now,
+  // rather than its own independent 30-second poll.
   useEffect(() => {
     if (!pendingCheck || askedCheckRef.current === pendingCheck.id) return;
     askedCheckRef.current = pendingCheck.id;
