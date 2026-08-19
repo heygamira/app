@@ -143,9 +143,16 @@ def _parent_map() -> dict[int, int]:
     return parents
 
 
-def _with_descendants(roots: list[int]) -> list[int]:
-    """The tracked processes plus everything living underneath them."""
-    parents = _parent_map()
+def _with_descendants(roots: list[int], parents: dict[int, int] | None = None) -> list[int]:
+    """The tracked processes plus everything living underneath them.
+
+    ``parents`` is the snapshot to read, so a caller with several roots can take
+    one and reuse it. Without that this walked the *entire* process table once
+    per root — six roots every three seconds is a hundred and twenty full walks
+    a minute, on a machine already carrying thirty-odd Chrome processes, from
+    the tool whose whole purpose is to notice things making the machine slow.
+    """
+    parents = _parent_map() if parents is None else parents
     if not parents:
         return list(roots)
     children: dict[int, list[int]] = {}
@@ -390,10 +397,15 @@ class SystemMonitor:
         rows: list[dict] = []
         alive: set[int] = set()
 
+        # One snapshot for all of them. Every root is walked against the same
+        # picture of the machine, which is both cheaper and more honest — the
+        # rows now describe one moment rather than six a few milliseconds apart.
+        parents = _parent_map()
+
         # One tree per tracked process, reported as one row: the interesting unit
         # is "the dashboard server", not "npm and the node it started".
         for root in roots:
-            tree = _with_descendants([root])
+            tree = _with_descendants([root], parents)
             tree_cpu = 0.0
             tree_mb = 0.0
             counted = 0

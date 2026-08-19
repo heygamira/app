@@ -7,18 +7,23 @@ wait for, like a heart rate of 140 or an oxygen saturation of 87.
 
 How it is wired:
 
-    watch (this process) --dev:<subject>--> Gamira API --> Parent App
-                                                       --> Family Dashboard
+    watch (this process) --pairing code only--> watch relay --> Parent App --> Gamira API
+                                                                          --> Family Dashboard
 
-The watch is paired to the person wearing it: it signs in as *their* account
-and records against *their* profile, exactly as a real paired device would.
-The backend allows that because a person may always record their own
-measurement; it would refuse the same request for anybody else.
+The watch holds no account of its own — no bearer token, no senior id, no call
+to the Gamira API at all, only a pairing code (what `--pair` passes below).
+That matches how a real watch actually gets data onto a phone: whether it is
+Health Connect, HealthKit, a watch vendor's own cloud, or raw Bluetooth GATT,
+the phone app is always the one thing with a server credential, never the
+watch. The relay (`watch_relay_server.py`, in the Parent App's own folder) is
+that bridge in miniature: the Parent App registers itself under this watch's
+pairing code once it is signed in, and is the only thing that ever drains the
+relay's mailbox and forwards to the real backend.
 
 The simulation loop lives here rather than in the page so it keeps running
 when the window is minimised, and so every send is visible in the terminal.
 
-    python sim_server.py --api http://127.0.0.1:8010 --port 8020 \
+    python sim_server.py --relay http://127.0.0.1:8021 --port 8020 \
         --pair sharma-senior="Dad's watch"
 
 Nothing here is clinical. The bands below decide what the *simulator* prints
@@ -35,6 +40,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import deque
 from datetime import datetime, timezone
@@ -149,17 +155,19 @@ def band_reason(metric: str, value: float, unit: str) -> str:
 
 
 class Watch:
-    """One simulated device, paired to one person."""
+    """One simulated device, paired by code to one running Parent App."""
 
-    def __init__(self, index: int, subject: str, label: str, api: str, interval: float):
+    def __init__(self, index: int, subject: str, label: str, relay: str, interval: float):
         self.index = index
+        # Doubles as the pairing code the relay and the Parent App both key
+        # on. Never sent anywhere as a credential — the watch has none.
         self.subject = subject
         self.label = label
-        self.api = api.rstrip("/")
+        self.relay = relay.rstrip("/")
         self.interval = interval
 
         self.lock = threading.Lock()
-        self.senior_id: str | None = None
+        self.paired = False
         self.person = ""
         self.scenario = "normal"
         self.paused = False
@@ -183,10 +191,6 @@ class Watch:
 
     # -- helpers ----------------------------------------------------------- #
 
-    @property
-    def token(self) -> str:
-        return f"dev:{self.subject}"
-
     def say(self, message: str, color: str = "") -> None:
         print(f"{CYAN}{self.label}{RESET} {color}{message}{RESET}", flush=True)
 
@@ -194,16 +198,22 @@ class Watch:
         with self.lock:
             self.log.appendleft({"at": now_iso(), "text": text, "kind": kind})
 
-    def _call(
+    def _relay(
         self, method: str, path: str, payload: dict[str, Any] | None = None
     ) -> tuple[int, Any]:
+        """Talk to the local watch relay — never the Gamira API directly.
+
+        No credential travels with this: the relay is loopback-only and holds
+        no account either. Everything the watch sends carries its pairing
+        code, which is all a real BLE-paired watch with no login of its own
+        would have to offer.
+        """
         data = None if payload is None else json.dumps(payload).encode("utf-8")
         request = urllib.request.Request(
-            f"{self.api}{path}",
+            f"{self.relay}{path}",
             data=data,
             method=method,
             headers={
-                "Authorization": f"Bearer {self.token}",
                 "Accept": "application/json",
                 **({"Content-Type": "application/json"} if data else {}),
             },
@@ -224,28 +234,27 @@ class Watch:
     # -- pairing ----------------------------------------------------------- #
 
     def pair(self, deadline_seconds: float = 45.0) -> bool:
-        """Find the profile this watch belongs to, waiting for the API to come up."""
+        """Wait for a running Parent App to claim this watch's pairing code.
+
+        The watch never learns a senior id or an account — only whether *some*
+        Parent App has registered itself under the same code, and the name it
+        gave itself while doing so.
+        """
         deadline = time.monotonic() + deadline_seconds
         while time.monotonic() < deadline:
-            status, body = self._call("GET", "/api/v1/me")
-            if status == 200:
-                user_id = (body.get("user") or {}).get("id")
-                seniors = body.get("seniors") or []
-                own = next((s for s in seniors if s.get("user_id") == user_id), None)
-                target = own or (seniors[0] if seniors else None)
-                if target is None:
-                    self.last_status = "no profile linked to this account"
-                    self.say("no cared-for profile for this account", RED)
-                    return False
-                self.senior_id = target["id"]
-                self.person = target.get("preferred_name") or "Unknown"
+            status, body = self._relay(
+                "GET", f"/pair-status?code={urllib.parse.quote(self.subject)}"
+            )
+            if status == 200 and (body or {}).get("paired"):
+                self.paired = True
+                self.person = body.get("person") or "Unknown"
                 self.last_status = "paired"
                 self.say(f"paired with {self.person}", DIM)
                 self.note(f"Paired with {self.person}")
                 return True
             time.sleep(1.0)
-        self.last_status = "could not reach the API"
-        self.say(f"could not reach {self.api}", RED)
+        self.last_status = "no Parent App has claimed this pairing code"
+        self.say(f"nobody claimed pairing code '{self.subject}'", RED)
         return False
 
     # -- simulation -------------------------------------------------------- #
@@ -288,39 +297,46 @@ class Watch:
         ]
 
     def send(self, force: bool = False) -> None:
-        if self.senior_id is None:
+        if not self.paired:
             return
 
         readings = self.reading_set()
         measured_at = now_iso()
         due = self._due_metrics(force)
         sent, failed, unusual = 0, 0, []
-        out: dict[str, tuple[float, str, str | None]] = {}
+        out: dict[str, tuple[float, str]] = {}
 
         for metric in due:
             unit = METRICS[metric][0]
             value = readings[metric]
             flagged = is_unusual(metric, value)
-            status, body = self._call(
+            # Handed to the relay, not the API: the real HealthReading row (and
+            # its id) is created later, by the Parent App, when it drains this
+            # and forwards it under its own session.
+            status, body = self._relay(
                 "POST",
-                f"/api/v1/seniors/{self.senior_id}/health-readings",
+                "/ingest/readings",
                 {
-                    "metric": metric,
-                    "value": value,
-                    "unit": unit,
-                    "source": "device",
-                    "source_device": f"Gamira Watch (sim) · {self.label}",
-                    "measured_at": measured_at,
-                    # The reading carries the device's own note, so the value
-                    # is never shown without the reason it was singled out.
-                    "note": band_reason(metric, value, unit) if flagged else None,
+                    "pairing_code": self.subject,
+                    "reading": {
+                        "metric": metric,
+                        "value": value,
+                        "unit": unit,
+                        "source": "device",
+                        "source_device": f"Gamira Watch (sim) · {self.label}",
+                        "measured_at": measured_at,
+                        # The reading carries the device's own note, so the
+                        # value is never shown without the reason it was
+                        # singled out.
+                        "note": band_reason(metric, value, unit) if flagged else None,
+                    },
                 },
             )
-            if status == 201:
+            if status == 202:
                 sent += 1
                 if flagged:
                     unusual.append(f"{metric.replace('_', ' ')} {value:g}{unit}")
-                    out[metric] = (value, unit, (body or {}).get("id"))
+                    out[metric] = (value, unit)
             else:
                 failed += 1
                 message = (body or {}).get("error", {}).get("message", f"HTTP {status}")
@@ -353,26 +369,31 @@ class Watch:
     def _tell_family(
         self,
         evaluated: list[str],
-        out: dict[str, tuple[float, str, str | None]],
+        out: dict[str, tuple[float, str]],
         measured_at: str,
     ) -> None:
-        """Raise a device flag when a metric leaves its band, and not again.
+        """Hand a device flag to the relay when a metric leaves its band, and
+        not again.
 
         Deliberately not an SOS. The family sees a notice attributed to this
-        watch; nobody is called, and Gamira does not add an opinion.
+        watch; nobody is called, and Gamira does not add an opinion. This does
+        not know whether the family was actually told — that answer comes
+        back from the real API, once the Parent App has forwarded it — only
+        that the relay accepted it for delivery.
         """
         now = time.monotonic()
-        for metric, (value, unit, reading_id) in out.items():
+        for metric, (value, unit) in out.items():
             entered = metric not in self.out_of_band
             stale = now - self.flagged_at.get(metric, 0.0) > FLAG_COOLDOWN_SECONDS
             if not (entered or stale):
                 continue
 
             reason = band_reason(metric, value, unit)
-            status, body = self._call(
+            status, body = self._relay(
                 "POST",
-                f"/api/v1/seniors/{self.senior_id}/device-flags",
+                "/ingest/device-flags",
                 {
+                    "pairing_code": self.subject,
                     "metric": metric,
                     "value": value,
                     "unit": unit,
@@ -381,39 +402,45 @@ class Watch:
                     # the family's notification.
                     "source_device": self.label,
                     "measured_at": measured_at,
-                    "reading_id": reading_id,
                 },
             )
-            if status == 201:
+            if status == 202:
                 self.flagged_at[metric] = now
                 self.flags_sent += 1
-                told = len(body.get("notified_user_ids", []))
                 self.say(
                     f"FLAGGED {metric.replace('_', ' ')} {value:g}{unit} — "
-                    f"{told} family member(s) told",
+                    "handed to the phone",
                     YELLOW,
                 )
                 self.note(f"Flagged {metric.replace('_', ' ')} {value:g}{unit}", "unusual")
             else:
                 message = (body or {}).get("error", {}).get("message", f"HTTP {status}")
                 self.note(f"flag rejected: {message}", "error")
+                # Back off exactly as a success would. Without this a rejected
+                # flag was retried on every tick for as long as the value
+                # stayed outside the band — `entered` is false by then and
+                # `stale` is true against a timestamp that was never set — so
+                # one broken endpoint became a request every few seconds,
+                # each one a full traceback in the console. That is what a
+                # failing server looks like from here, and hammering it is the
+                # one thing a client must not do about it.
+                self.flagged_at[metric] = now
 
         # Only metrics measured this tick can be said to have returned to
         # range; the others keep whatever state they had.
         self.out_of_band = (self.out_of_band - set(evaluated)) | set(out)
 
     def raise_sos(self, note: str | None = None) -> tuple[int, Any]:
-        if self.senior_id is None:
+        if not self.paired:
             return 0, {"error": {"message": "not paired"}}
-        status, body = self._call(
+        status, body = self._relay(
             "POST",
-            f"/api/v1/seniors/{self.senior_id}/sos",
-            {"source": "watch", "note": note or None},
+            "/ingest/sos",
+            {"pairing_code": self.subject, "source": "watch", "note": note or None},
         )
-        if status == 201:
-            notified = len(body.get("notified_user_ids", []))
-            self.say(f"SOS RAISED — {notified} family member(s) alerted in-app", RED)
-            self.note(f"SOS raised · {notified} alerted", "sos")
+        if status == 202:
+            self.say("SOS RAISED — handed to the phone to alert the family", RED)
+            self.note("SOS raised · handed to the phone", "sos")
         else:
             message = (body or {}).get("error", {}).get("message", f"HTTP {status}")
             self.say(f"SOS failed: {message}", RED)
@@ -446,7 +473,7 @@ class Watch:
                 "label": self.label,
                 "subject": self.subject,
                 "person": self.person,
-                "senior_id": self.senior_id,
+                "paired": self.paired,
                 "scenario": self.scenario,
                 "scenario_label": SCENARIOS[self.scenario]["label"],
                 "paused": self.paused,
@@ -561,7 +588,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(202, {"ok": True})
         elif path == "/api/sos":
             status, body = watch.raise_sos(payload.get("note"))
-            self._json(200 if status == 201 else 502, body)
+            self._json(200 if status == 202 else 502, body)
         else:
             self._json(404, {"error": "not found"})
 
@@ -576,7 +603,12 @@ def parse_pairs(values: list[str]) -> list[tuple[str, str]]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Simulated Gamira watch")
-    parser.add_argument("--api", default="http://127.0.0.1:8010")
+    parser.add_argument(
+        "--relay",
+        default="http://127.0.0.1:8021",
+        help="The watch relay's own address (see watch_relay_server.py) — "
+        "never the Gamira API; the watch has no account to call it with.",
+    )
     parser.add_argument("--port", type=int, default=8020)
     # 0.0.0.0 only when the runner is set up for phone testing: this face can
     # write readings and raise an SOS for the person it is paired to.
@@ -586,14 +618,15 @@ def main() -> int:
         "--pair",
         action="append",
         default=[],
-        metavar="SUBJECT=LABEL",
-        help="A development identity to wear this watch, e.g. sharma-senior=Dad",
+        metavar="CODE=LABEL",
+        help="A pairing code this watch wears, e.g. sharma-senior=Dad's watch. "
+        "Matched against whichever Parent App registers under the same code.",
     )
     args = parser.parse_args()
 
     pairs = parse_pairs(args.pair) or [("sharma-senior", "Dad's watch")]
     watches = [
-        Watch(index, subject, label, args.api, args.interval)
+        Watch(index, subject, label, args.relay, args.interval)
         for index, (subject, label) in enumerate(pairs)
     ]
     Handler.watches = watches

@@ -1,0 +1,10 @@
+# Disposable e2e database and any other on-disk state the backend writes
+# while this suite runs. Never a developer's real local database.
+.data/
+
+node_modules/
+
+# Playwright output
+test-results/
+playwright-report/
+playwright/.cache/

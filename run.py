@@ -7,9 +7,14 @@
 
 What comes up:
 
-    watch sim  ──►  Gamira API (FastAPI, SQLite)  ──►  Parent App    (phone window)
-                                                  ──►  Family Dash   (phone window)
+    watch sim  ──►  watch relay  ──►  Parent App  ──►  Gamira API  ──►  Family Dash
+    (pairing code only, no account of its own)   (phone window)   (FastAPI, SQLite)   (phone window)
     Gemini Live token server  ──►  Parent App voice
+
+The watch never talks to the Gamira API directly — only the Parent App does,
+the same way a real watch's data only ever reaches a server through the phone
+it is paired to (Health Connect, HealthKit, or a vendor's own app). See
+watch_relay_server.py for why.
 
 Each app opens in its own phone-sized window with its own browser profile, so
 two Parent Apps can be two different people at the same time. This terminal is
@@ -52,6 +57,10 @@ API_PORT = 8010
 PARENT_PORT = 5173
 DASHBOARD_PORT = 5174
 WATCH_PORT = 8020
+# Where a paired watch's data lands before the Parent App forwards it to the
+# real API — see gamira-parent-app-original/watch_relay_server.py. Not the
+# Gamira API's own port: the watch never talks to that directly.
+WATCH_RELAY_PORT = 8021
 VOICE_PORT = 8787
 CONSOLE_PORT = 8030
 
@@ -94,6 +103,15 @@ WATCH_INTERVAL_SECONDS = 6.0
 
 VOICE = True  # start the Gemini Live token server alongside the Parent App
 OPEN_WINDOWS = True
+# What opens by itself. Only the console, because every app window is a whole
+# separate Chrome — a profile, a GPU process, a renderer per tab, and in the
+# parent app's case a wake-word model running continuously in WASM. Opening
+# four of those before anybody has asked for one is most of the load this
+# machine complains about, and most runs need two of them at a time.
+#
+# So: the console opens, and the Apps tab in it opens the rest, one button at a
+# time, with a Close beside each. `--open-all` restores the old behaviour.
+OPEN_APPS_AT_START = False
 API_RELOAD = True  # uvicorn --reload on app/ only: edit the backend and it restarts
 
 # --------------------------------------------------------------------------- #
@@ -131,6 +149,7 @@ COLORS = {
     "parent": "\033[36m",
     "dash": "\033[35m",
     "watch": "\033[33m",
+    "watch-relay": "\033[33m",
     "voice": "\033[95m",
     "db": "\033[90m",
     "err": "\033[31m",
@@ -157,6 +176,20 @@ SPECS: dict[str, dict] = {}
 # PIDs this runner killed itself. Their output pump must not report them as a
 # crash on the way out.
 STOPPED_ON_PURPOSE: set[int] = set()
+# Every browser profile a window has been opened with. A window is identified by
+# its profile rather than by a pid, because reopening one hands the URL to the
+# browser already using that profile and the new process exits at once.
+WINDOW_PROFILES: set[str] = set()
+# Which of the planned windows are believed to be on screen, so the Apps tab can
+# offer Open or Close rather than both. Believed, not known: somebody can close
+# a window with its own X and nothing tells us. Close is offered anyway and is
+# harmless when there is nothing to close.
+OPEN_WINDOW_NAMES: set[str] = set()
+
+
+def window_profile(name: str) -> str:
+    """The profile directory a named window uses. One definition, two callers."""
+    return str(PROFILES / name)
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 # The clock is optional: a console record carries its time as a field now, so the
@@ -182,6 +215,76 @@ def safe_request_id(value: str) -> str:
     return UNSAFE_IN_ID.sub("", value or "")[:64]
 
 
+# The structured events the backend emits about its own decisions. Listed
+# rather than pattern-matched: a prefix like "ai_" would quietly catch any
+# future log line and put it on a screen labelled "what Gamira decided".
+MIND_EVENTS = (
+    "ai_tool_call",
+    "ai_review_recorded",
+    "ai_memory_written",
+    "ai_reminder_suggested",
+    "ai_family_notice_sent",
+    "ai_family_notice_held",
+    "ai_told_family",
+    "live_session_created",
+    "live_session_promoted",
+    "wellbeing_check_opened",
+    "wellbeing_check_answered",
+    "wellbeing_check_escalated",
+)
+
+# What each one says in English, given its parsed fields. A console that shows
+# `ai_tool_call tool=mark_dose_taken outcome=confirming` is a log with extra
+# steps; the point of the screen is to be readable at a glance by somebody who
+# has not memorised the event names.
+def narrate_mind(event: str, fields: dict) -> str:
+    tool = fields.get("tool", "something")
+    if event == "ai_tool_call":
+        outcome = fields.get("outcome")
+        if outcome == "confirming":
+            return f"Gamira asked to {tool.replace('_', ' ')} — waiting for a yes"
+        if outcome == "done":
+            return f"Gamira did: {tool.replace('_', ' ')}"
+        return f"Gamira was refused: {tool.replace('_', ' ')} ({fields.get('error', '?')})"
+    if event == "ai_review_recorded":
+        bits = [f"read back {fields.get('turns', '?')} turns"]
+        if fields.get("mood"):
+            bits.append(f"mood {fields['mood']}")
+        if fields.get("memories", "0") != "0":
+            bits.append(f"{fields['memories']} to remember")
+        if fields.get("suggestions", "0") != "0":
+            bits.append(f"{fields['suggestions']} suggested")
+        if str(fields.get("notify_family", "")).lower() == "true":
+            bits.append("wants to tell the family")
+        return "Gamira reviewed a conversation — " + ", ".join(bits)
+    if event == "ai_memory_written":
+        return f"Gamira kept {fields.get('kept', '?')} thing(s) about them"
+    if event == "ai_reminder_suggested":
+        return f"Gamira suggested a routine at {fields.get('at', '?')}"
+    if event == "ai_family_notice_sent":
+        return f"Gamira told {fields.get('recipients', '?')} family member(s)"
+    if event == "ai_family_notice_held":
+        return "Gamira held a family notice for the morning"
+    if event == "ai_told_family":
+        # Not the same as the notice above: that one is Gamira's own idea after
+        # a conversation, this one is the person asking her to pass something on.
+        return (
+            f"They asked Gamira to tell the family — "
+            f"{fields.get('recipients', '?')} told"
+        )
+    if event == "live_session_created":
+        return "A voice session opened"
+    if event == "live_session_promoted":
+        return "A guessed voice session turned out to be real"
+    if event == "wellbeing_check_opened":
+        return f"A watch flagged {fields.get('metric', 'a reading')} — Gamira will ask"
+    if event == "wellbeing_check_answered":
+        return f"They answered: {fields.get('answer', '?')}"
+    if event == "wellbeing_check_escalated":
+        return f"Nobody answered ({fields.get('outcome', '?')}) — the family was told"
+    return event  # pragma: no cover - the tuple above is the allowlist
+
+
 def classify(text: str, meta: dict | None = None) -> str:
     """Label a line so the console can filter by what it means, not by words.
 
@@ -192,6 +295,11 @@ def classify(text: str, meta: dict | None = None) -> str:
         return "sos"
     if "UNUSUAL" in text:
         return "unusual"
+    # Its own kind rather than "info": what the assistant decided is the one
+    # thing in this system that was previously impossible to watch, and burying
+    # it in the same bucket as "worker started" is how it stayed that way.
+    if text.startswith(MIND_EVENTS):
+        return "mind"
     if meta and meta.get("status") and meta.get("method"):
         if int(meta["status"]) >= 400:
             return "error"
@@ -207,17 +315,60 @@ def classify(text: str, meta: dict | None = None) -> str:
     return "info"
 
 
-class LogBus:
-    """Every line this runner prints, kept so the console window can show it.
+# Where this run's log is written. Set by `open_log_file()` in main(); None
+# means writing failed and the run carries on without one.
+LOG_FILE: Path | None = None
+# How many previous run logs to keep. Enough to compare this run with the one
+# where the thing happened, not so many that a folder nobody opens grows all
+# year.
+LOG_KEEP = 20
 
-    A ring buffer rather than a file: this is a development view of what just
-    happened, and nothing here is the audit trail — that lives in the API.
+
+def open_log_file() -> Path | None:
+    """Start a log file for this run, and tidy up old ones.
+
+    The ring buffer below holds the last few thousand lines, which is exactly
+    the wrong amount when the interesting thing happened twenty minutes and one
+    dependency re-scan ago. A traceback storm can push a stack trace out of it
+    in a second, and the console's own Save button only ever had the lines the
+    browser still held.
+
+    So every line is also appended here, as it happens. Plain text, one line
+    per entry, with the tag: it is meant to be opened in an editor and searched.
+    """
+    global LOG_FILE
+    folder = ROOT / "logs"
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        existing = sorted(folder.glob("run-*.log"), key=lambda f: f.stat().st_mtime)
+        for stale in existing[: max(0, len(existing) - LOG_KEEP + 1)]:
+            stale.unlink(missing_ok=True)
+        LOG_FILE = folder / time.strftime("run-%Y%m%d-%H%M%S.log")
+        with LOG_FILE.open("w", encoding="utf-8") as handle:
+            stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            handle.write("# Gamira run started " + stamp + chr(10))
+    except OSError:
+        # A run that cannot write a log is still a run.
+        LOG_FILE = None
+    return LOG_FILE
+
+
+class LogBus:
+    """Every line this runner prints: kept in memory for the console, and on
+    disk for afterwards.
+
+    The ring buffer is what the console window shows — a live view of what just
+    happened. The file is the part that survives the buffer filling up, the
+    console being closed, and the run itself ending, which is when somebody
+    usually wants to know what went wrong. Neither is an audit trail; that
+    lives in the API.
     """
 
     def __init__(self, capacity: int = 6000) -> None:
         self.lock = threading.Lock()
         self.entries: deque[dict] = deque(maxlen=capacity)
         self.seq = 0
+        self.handle = None
 
     def add(self, tag: str, text: str, meta: dict | None = None) -> None:
         plain = ANSI.sub("", text).rstrip()
@@ -241,6 +392,31 @@ class LogBus:
             if meta:
                 entry.update(meta)
             self.entries.append(entry)
+        self._write(entry)
+
+    def _write(self, entry: dict) -> None:
+        """Append one line to this run's log file.
+
+        Outside the lock the buffer uses: a slow disk must not hold up the
+        thread that produced the line, which is a service's output pump. Opened
+        once and kept open, because a line per open() is a syscall storm during
+        exactly the bursts worth recording.
+        """
+        if LOG_FILE is None:
+            return
+        try:
+            if self.handle is None:
+                self.handle = LOG_FILE.open("a", encoding="utf-8", buffering=1)
+            note = entry.get("note")
+            suffix = f"  | {note}" if note else ""
+            self.handle.write(
+                f"{entry['at']} [{entry['tag']:<6}] {entry['text']}{suffix}" + chr(10)
+            )
+        except OSError:
+            # Disk full, file locked, folder deleted underneath us. None of it
+            # is worth taking the run down for, and reporting it here would
+            # recurse straight back into this function.
+            self.handle = None
 
     def after(self, seq: int, limit: int = 900) -> list[dict]:
         """Everything newer than `seq`, newest last, capped.
@@ -485,10 +661,17 @@ def pump(process: subprocess.Popen, tag: str, render) -> None:
     # The API, worker, watch and voice can be brought back from the console.
     # Losing an app dev server means its windows are dead, so the stack comes
     # down rather than leaving windows that quietly show nothing.
-    if tag in ("api", "worker", "watch", "voice"):
+    if tag in ("api", "worker", "watch", "watch-relay", "voice"):
         say("  bring it back with Restart in the server console.")
     else:
-        stop_all()
+        # *Ask* the main thread, exactly as the console button does. This ran
+        # `stop_all()` here, on this daemon thread — and `stop_all()` sets
+        # `shutting_down` as its first act, which the main loop is watching, so
+        # the main thread exited within 0.3s and the interpreter tore down this
+        # thread part-way through the kills. It is the same bug that was fixed
+        # for the console path and left standing on this one, which is the path
+        # taken whenever an app's dev server dies.
+        shutdown_requested.set()
 
 
 def spawn(tag: str, command: list[str], cwd: Path, env: dict | None = None, render=None):
@@ -605,6 +788,7 @@ def find_orphans() -> list[dict]:
         "$_.CommandLine -like '*app.worker*' -or "
         "$_.CommandLine -like '*uvicorn app.main*' -or "
         "$_.CommandLine -like '*gemini_token_server*' -or "
+        "$_.CommandLine -like '*watch_relay_server*' -or "
         "$_.CommandLine -like '*sim_server.py*' -or "
         # A stranded Vite keeps 5173 or 5174 and the next run fails on
         # --strictPort with nothing to explain why.
@@ -638,6 +822,8 @@ def find_orphans() -> list[dict]:
             kind = "api"
         elif "gemini_token_server" in command:
             kind = "voice lab"
+        elif "watch_relay_server" in command:
+            kind = "watch relay"
         elif "gamira-parent-app-original" in command:
             kind = "parent app server"
         elif "gamira-family-dashboard" in command:
@@ -783,6 +969,16 @@ def stop_all() -> None:
     for _, process in console_windows:
         kill(process)
 
+    # Last, and after the console window has been asked to go: windows whose
+    # launcher process is long gone. Nothing else can close these — `kill()`
+    # returns early on a dead handle, and `find_orphans` only ever matches
+    # python and node. Doing it earlier would take away the window showing the
+    # shutdown before the shutdown had finished, which is the mistake the
+    # console-last ordering above exists to avoid.
+    stragglers = close_windows_by_profile()
+    if stragglers:
+        say(f"closed {stragglers} browser window process(es) by profile")
+
 
 # --------------------------------------------------------------------------- #
 # Reading the API's log back out
@@ -858,6 +1054,21 @@ def render_api(text: str) -> tuple[list[str], list[Record]]:
 
     fields = dict(KEY_VALUE.findall(rest))
     request_id = safe_request_id(match.group("request_id") or "")
+
+    # What the assistant decided, parsed into fields rather than left as prose,
+    # so the console can lay it out and the Mind tab can group it.
+    if rest.startswith(MIND_EVENTS):
+        event = rest.split(" ", 1)[0]
+        note = narrate_mind(event, fields)
+        meta = {"event": event, "note": note}
+        if request_id:
+            meta["request_id"] = request_id
+        colour = COLORS["err"] if fields.get("outcome") == "refused" else COLORS["run"]
+        return (
+            [f"{DIM}{clock}{RESET} {colour}{note}{RESET}"],
+            [(rest.rstrip(), meta)],
+        )
+
     if not rest.startswith(("request_completed", "request_failed")):
         colour = COLORS["err"] if match.group("level") in ("ERROR", "CRITICAL") else DIM
         meta = {"request_id": request_id} if request_id else None
@@ -1000,10 +1211,70 @@ def open_window(
     # tab twenty times does not retain twenty OS process handles.
     browsers[:] = [pair for pair in browsers if pair[1].poll() is None]
     browsers.append((name, process))
+    # The profile directory, not the pid, is what actually identifies a window.
+    # Reopening one from the Control tab hands the URL to the browser already
+    # using that profile and exits immediately — so the handle above is dead
+    # within a second, `kill()` returns early on it, and the window stays on
+    # screen through a shutdown that reported success.
+    WINDOW_PROFILES.add(str(profile))
+    OPEN_WINDOW_NAMES.add(name)
     # In the job too, so a crash of this runner does not leave windows showing
     # pages that no longer have a server behind them. Best effort: Chrome nests
     # its own sandbox jobs, and adopt() swallows a refusal.
     adopt(KILL_JOB, process)
+
+
+def close_windows_by_profile(profiles: set[str] | None = None) -> int:
+    """Close browser windows by the profile they were opened with.
+
+    A window is a Chrome started with `--user-data-dir=<profile>`, and that flag
+    is on its command line for as long as it lives. Matching on it is exact: it
+    can only ever hit a browser this runner opened, because these profiles exist
+    nowhere else and hold nothing but this stack.
+
+    With no argument this closes every window the run opened, which is what a
+    shutdown wants. With one profile it closes that window, which is what the
+    Close button beside it in the Apps tab wants — a window nobody is looking
+    at is several processes and, for the parent app, a wake-word model running
+    inference twelve times a second.
+    """
+    wanted = WINDOW_PROFILES if profiles is None else profiles
+    if not IS_WINDOWS or not wanted:
+        return 0
+    conditions = " -or ".join(
+        f"$_.CommandLine -like '*{profile}*'" for profile in sorted(wanted)
+    )
+    script = (
+        "Get-CimInstance Win32_Process | "
+        f"Where-Object {{ $_.CommandLine -and ({conditions}) }} | "
+        "Select-Object -ExpandProperty ProcessId"
+    )
+    try:
+        finished = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    closed = 0
+    for line in (finished.stdout or "").splitlines():
+        pid = line.strip()
+        if not pid.isdigit():
+            continue
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", pid],
+                capture_output=True,
+                timeout=10,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            closed += 1
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return closed
 
 
 class Tiler:
@@ -1361,6 +1632,7 @@ class Console:
             ("parent", "Parent App server"),
             ("dash", "Dashboard server"),
             ("watch", "Watch simulator"),
+            ("watch-relay", "Watch relay"),
             ("voice", "Voice lab (local only)"),
         ):
             if tag not in SPECS:
@@ -1371,6 +1643,7 @@ class Console:
                 "parent": self.ports["parent"],
                 "dash": self.ports["dash"],
                 "watch": self.ports["watch"],
+                "watch-relay": self.ports["watch_relay"],
                 "voice": self.ports["voice"],
             }.get(tag)
             alive = running(tag)
@@ -1387,11 +1660,18 @@ class Console:
         database = sqlite_file()
         return {
             "services": services,
-            "windows": self.windows,
+            # A copy with what is on screen folded in. `self.windows` is the
+            # plan; whether one is open is a fact about now, and the Apps tab
+            # needs both to show Open next to Close.
+            "windows": [
+                {**window, "open": window["name"] in OPEN_WINDOW_NAMES}
+                for window in self.windows
+            ],
             "people": self.people,
             "ports": self.ports,
             "phone": self.phone,
             "uptime": int(time.monotonic() - self.started),
+            "logfile": str(LOG_FILE) if LOG_FILE else None,
             "database": {
                 "path": str(database) if database else None,
                 "kind": "sqlite" if database else "postgresql",
@@ -1476,6 +1756,9 @@ class Console:
             "seed": self._seed,
             "clear-logs": self._clear_logs,
             "open-window": self._open_window,
+            "close-window": self._close_window,
+            "open-all-windows": self._open_all_windows,
+            "close-all-windows": self._close_all_windows,
             "open-docs": self._open_docs,
             "test-sos": self._test_sos,
             "test-flag": self._test_flag,
@@ -1630,6 +1913,42 @@ class Console:
             insecure=self.insecure_windows,
         )
         return f"opened {window['label']}"
+
+    def _close_window(self, payload: dict) -> str:
+        index = int(payload.get("index", -1))
+        if not 0 <= index < len(self.windows):
+            raise ValueError("no such window")
+        window = self.windows[index]
+        closed = close_windows_by_profile({window_profile(window["name"])})
+        OPEN_WINDOW_NAMES.discard(window["name"])
+        if not closed:
+            return f"{window['label']} was not open"
+        return f"closed {window['label']}"
+
+    def _open_all_windows(self, payload: dict) -> str:
+        opened = 0
+        for index in range(len(self.windows)):
+            if self.windows[index]["name"] in OPEN_WINDOW_NAMES:
+                continue
+            self._open_window({"index": index})
+            opened += 1
+        return f"opened {opened} window(s)"
+
+    def _close_all_windows(self, payload: dict) -> str:
+        """Close every app window and leave this console open.
+
+        The console is deliberately exempt: it is the thing the button was
+        pressed in, and closing it would leave a running stack with nothing
+        looking at it.
+        """
+        profiles = {
+            window_profile(window["name"])
+            for window in self.windows
+            if window["name"] != "console"
+        }
+        closed = close_windows_by_profile(profiles)
+        OPEN_WINDOW_NAMES.intersection_update({"console"})
+        return f"closed {closed} window(s)"
 
     def _open_docs(self, payload: dict) -> str:
         url = f"http://127.0.0.1:{self.ports['api']}/docs"
@@ -1829,6 +2148,99 @@ class Console:
         )
         return {"conversations": ordered[:limit]}
 
+    def mind(self, limit: int = 40) -> dict:
+        """Everything the AI layer has decided, observed or kept.
+
+        The logs show these as they happen and then scroll away; this is the
+        standing answer to "what has it actually been doing?". Six lists, each
+        straight out of the tables the backend writes, because the alternative
+        — inferring it from log lines — would be a second, wrong account of the
+        same events.
+
+        Read-only, like every other database view in this console, and it
+        deliberately shows the *decisions* rather than the transcript: what was
+        said is the Conversation tab, and mixing the two would make a screen
+        nobody could scan.
+        """
+        blocks: dict[str, list] = {
+            "decisions": [],
+            "observations": [],
+            "memories": [],
+            "suggestions": [],
+            "notices": [],
+            "usage": [],
+            "checks": [],
+        }
+        queries = {
+            "decisions": """
+                SELECT d.tool_name, d.policy_result, d.confirmation_state,
+                       d.status, d.error_code, d.created_at, d.executed_at,
+                       d.request_id, s.preferred_name AS who
+                  FROM ai_decisions d
+                  LEFT JOIN senior_profiles s ON s.id = d.senior_profile_id
+                 ORDER BY d.created_at DESC LIMIT ?
+            """,
+            "observations": """
+                SELECT a.kind, a.content, a.facts, a.model, a.prompt_version,
+                       a.review_state, a.generated_at, s.preferred_name AS who
+                  FROM ai_summaries a
+                  LEFT JOIN senior_profiles s ON s.id = a.senior_profile_id
+                 ORDER BY a.generated_at DESC LIMIT ?
+            """,
+            "memories": """
+                SELECT m.kind, m.content, m.created_at, m.deleted_at,
+                       s.preferred_name AS who
+                  FROM senior_memories m
+                  LEFT JOIN senior_profiles s ON s.id = m.senior_profile_id
+                 ORDER BY m.created_at DESC LIMIT ?
+            """,
+            "suggestions": """
+                SELECT r.title, r.local_time, r.status, r.suggestion_reason,
+                       r.created_at, s.preferred_name AS who
+                  FROM reminders r
+                  LEFT JOIN senior_profiles s ON s.id = r.senior_profile_id
+                 WHERE r.status = 'SUGGESTED'
+                 ORDER BY r.created_at DESC LIMIT ?
+            """,
+            "notices": """
+                SELECT n.title, n.body, n.type, n.created_at,
+                       s.preferred_name AS who
+                  FROM notification_deliveries n
+                  LEFT JOIN senior_profiles s ON s.id = n.senior_profile_id
+                 WHERE n.related_entity_type = 'ai_summary'
+                 ORDER BY n.created_at DESC LIMIT ?
+            """,
+            "usage": """
+                SELECT operation, outcome, error_code, model, latency_ms,
+                       prompt_tokens, response_tokens, total_tokens,
+                       created_at
+                  FROM ai_usage
+                 ORDER BY created_at DESC LIMIT ?
+            """,
+            "checks": """
+                SELECT w.metric, w.reason, w.status, w.asked_at, w.answered_at,
+                       w.created_at, s.preferred_name AS who
+                  FROM wellbeing_checks w
+                  LEFT JOIN senior_profiles s ON s.id = w.senior_profile_id
+                 ORDER BY w.created_at DESC LIMIT ?
+            """,
+        }
+        try:
+            with read_only_db() as connection:
+                for name, sql in queries.items():
+                    try:
+                        rows = connection.execute(sql, (limit,)).fetchall()
+                    except sqlite3.Error:
+                        # A table that does not exist yet (an un-migrated
+                        # database) empties one block rather than the screen.
+                        continue
+                    blocks[name] = [
+                        {key: _cell(row[key]) for key in row.keys()} for row in rows
+                    ]
+        except (sqlite3.Error, FileNotFoundError) as error:
+            return {**blocks, "error": str(error)}
+        return blocks
+
     def query(self, sql: str) -> dict:
         if not SAFE_QUERY.match(sql or ""):
             raise ValueError("Only SELECT statements are allowed here.")
@@ -1941,6 +2353,11 @@ def console_handler(console: Console):
                     self._json(200, console.voice_config())
                 elif path == "/api/cost":
                     self._json(200, console.cost())
+                elif path == "/api/mind":
+                    if not self._local():
+                        self._json(403, {"error": "This view is local-only."})
+                        return
+                    self._json(200, console.mind())
                 elif path == "/api/conversations":
                     if not self._local():
                         self._json(403, {"error": "Conversations are local-only."})
@@ -2216,6 +2633,10 @@ def summary(
         print(f"  {BOLD}{name:<14}{RESET}{url:<46}{DIM}{who}{RESET}")
 
     print(f"\n  {BOLD}Try this{RESET}")
+    if console_on:
+        print("  0. In the console's Apps tab, open the Parent App, a dashboard and")
+        print("     a watch. Only the console opens by itself now: each window is a")
+        print("     whole browser, and four of them is most of the load on this PC.")
     print("  1. In a watch window pick \"Racing heart\" — the value appears on that")
     print("     person's Health screen and in the dashboard within a few seconds.")
     print("  2. Press SOS in a Parent App — the dashboard raises a red alert, and")
@@ -2226,6 +2647,8 @@ def summary(
         print("     the voice lab, what it has cost, and the database.")
     if not phone.get("enabled"):
         print(f"  {DIM}Run with --phone to open the apps on a phone, mic and all.{RESET}")
+    if LOG_FILE is not None:
+        print(f"  {DIM}Every line is also written to {LOG_FILE}{RESET}")
     print(f"\n  {DIM}Ctrl+C stops everything.{RESET}")
     print(f"{COLORS['run']}{rule}{RESET}\n")
 
@@ -2248,6 +2671,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--parent-port", type=int, default=PARENT_PORT)
     parser.add_argument("--dashboard-port", type=int, default=DASHBOARD_PORT)
     parser.add_argument("--watch-port", type=int, default=WATCH_PORT)
+    parser.add_argument("--watch-relay-port", type=int, default=WATCH_RELAY_PORT)
     parser.add_argument("--voice-port", type=int, default=VOICE_PORT)
     parser.add_argument("--console-port", type=int, default=CONSOLE_PORT)
     parser.add_argument(
@@ -2266,6 +2690,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--no-console", action="store_true")
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument(
+        "--open-all",
+        action="store_true",
+        help=(
+            "Open every app window at start-up. Without this only the console "
+            "opens, and its Apps tab opens the rest when you want them."
+        ),
+    )
     parser.add_argument(
         "--phone",
         "--lan",
@@ -2293,11 +2725,15 @@ def main() -> int:
     KILL_JOB = open_kill_job()
 
     args = parse_args()
+    # Before any output: everything said from here on is also written to disk,
+    # so a run that went wrong can be read after the window has gone.
+    open_log_file()
     ports = {
         "api": args.api_port,
         "parent": args.parent_port,
         "dash": args.dashboard_port,
         "watch": args.watch_port,
+        "watch_relay": args.watch_relay_port,
         "voice": args.voice_port,
         "console": args.console_port,
     }
@@ -2340,6 +2776,7 @@ def main() -> int:
         needed.append((ports["dash"], "Family Dashboard", "--dashboard-port"))
     if watches:
         needed.append((ports["watch"], "watch simulator", "--watch-port"))
+        needed.append((ports["watch_relay"], "watch relay", "--watch-relay-port"))
     console_on = CONSOLE and not args.no_console
     if console_on:
         needed.append((ports["console"], "server console", "--console-port"))
@@ -2471,6 +2908,7 @@ def main() -> int:
     front_env = {
         "GAMIRA_API_TARGET": f"http://127.0.0.1:{api_port}",
         "GAMIRA_TOKEN_TARGET": f"http://127.0.0.1:{ports['voice']}",
+        "GAMIRA_WATCH_RELAY_TARGET": f"http://127.0.0.1:{ports['watch_relay']}",
         "VITE_POLL_MS": str(POLL_MS),
         "BROWSER": "none",  # Vite must not open a window of its own
     }
@@ -2508,6 +2946,16 @@ def main() -> int:
         )
 
     if watches:
+        # One shared process for every paired watch this run has, same as the
+        # single "voice" token server above — not one relay per watch, and not
+        # one per Parent App window either. It holds nothing but a mailbox, so
+        # sharing it costs nothing and a per-watch process would buy nothing.
+        spawn(
+            "watch-relay",
+            [python, "-u", "watch_relay_server.py"],
+            PARENT_APP,
+            {"GAMIRA_WATCH_RELAY_PORT": str(ports["watch_relay"])},
+        )
         pairs = []
         for subject, label in watches:
             pairs += ["--pair", f"{subject}={label}"]
@@ -2517,7 +2965,7 @@ def main() -> int:
                 python,
                 "-u",
                 str(WATCH_SIM / "sim_server.py"),
-                "--api", f"http://127.0.0.1:{api_port}",
+                "--relay", f"http://127.0.0.1:{ports['watch_relay']}",
                 "--port", str(ports["watch"]),
                 "--host", "0.0.0.0" if phone_host else "127.0.0.1",
                 "--interval", str(WATCH_INTERVAL_SECONDS),
@@ -2532,6 +2980,7 @@ def main() -> int:
     if dashboards:
         ready &= wait_for_port(ports["dash"], "the Family Dashboard dev server")
     if watches:
+        ready &= wait_for_port(ports["watch_relay"], "the watch relay")
         ready &= wait_for_port(ports["watch"], "the watch simulator")
     if not ready:
         stop_all()
@@ -2644,7 +3093,17 @@ def main() -> int:
             say("  the windows will not be phone-sized.")
         console.browser = browser
         console.insecure_windows = bool(tls)
-        for window in planned:
+        # Only the console, unless asked otherwise. Every other window is a
+        # separate Chrome — its own profile, GPU process and renderers, and for
+        # the parent app a wake-word model running continuously — so opening
+        # four of them before anybody has asked for one is most of the weight
+        # on the machine and most of it unwanted.
+        at_start = [
+            window
+            for window in planned
+            if args.open_all or OPEN_APPS_AT_START or window["name"] == "console"
+        ]
+        for window in at_start:
             open_window(
                 browser,
                 window["url"],
@@ -2653,6 +3112,8 @@ def main() -> int:
                 tuple(window["slot"]),
                 insecure=bool(tls),
             )
+        if len(at_start) < len(planned):
+            say(f"{len(planned) - len(at_start)} window(s) not opened — see the console's Apps tab")
 
     summary(parents, dashboards, watches, voice_on, console_on, ports, console.phone)
 

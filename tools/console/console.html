@@ -75,6 +75,14 @@
 
       main { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 10px 14px 12px; }
       .tab { display: none; flex: 1; min-height: 0; flex-direction: column; gap: 8px; }
+      /* A bare div inside a column flex container refuses to shrink below its
+         content, so anything long grew past the bottom of the window and was
+         clipped by `body { overflow: hidden }` — with nothing anywhere on the
+         path that could be scrolled. `.panel` tabs were fine because
+         `overflow-y: auto` is exactly what zeroes that automatic minimum. */
+      #talk-list,
+      #mind-list,
+      #app-cards { flex: 1; min-height: 0; overflow-y: auto; }
 
       /* Health meters. Never colour alone: every state also carries a word. */
       .meter { margin-bottom: 14px; }
@@ -155,6 +163,10 @@
       /* The plain-language note belongs to the request above it, so it sits
          inside the same row instead of being a second line to scroll past. */
       .row .note { grid-column: 4 / -1; color: var(--accent); font-size: 11px; }
+      .row .fields {
+        grid-column: 4 / -1; font-size: 10px; line-height: 1.5;
+        word-break: break-all; opacity: .75;
+      }
       .row.k-sos .note { color: #fca5a5; font-weight: 700; }
       .row .rep {
         font-size: 10px; color: var(--muted); margin-left: 6px;
@@ -284,6 +296,50 @@
       .review b { font-weight: 600; color: #fcd34d; opacity: 0.8; }
       .review span { white-space: pre-wrap; word-break: break-word; }
       .review .note { grid-column: 2; }
+
+      /* What the assistant decided, in the log stream.
+         Violet, not amber. Amber was already spoken for twice — `k-unusual` is
+         a whole log kind and `tag-watch` is a whole service — and a third
+         meaning for one colour is a colour that means nothing. Violet is the
+         accent Gamira wears in the app itself, so the two surfaces agree about
+         which colour is hers.
+         The sentence is the row; the raw fields are the detail underneath.
+         They were the other way round, which is why these looked like noise. */
+      .row.k-mind { border-left-color: var(--violet); }
+      .k-mind .msg { color: #c4b5fd; }
+      .row.k-mind .fields { color: #6b7280; }
+
+      /* The Mind tab. Deliberately plain: it is a list of things that
+         happened, and anything decorative here would be an editorial opinion
+         about records whose whole point is that they are unedited. */
+      .mind-group { margin-bottom: 18px; }
+      .mind-group > h3 {
+        margin: 0 0 6px;
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: #fcd34d;
+        opacity: 0.85;
+      }
+      .mind-row {
+        display: grid;
+        grid-template-columns: 128px 1fr;
+        gap: 10px;
+        padding: 6px 8px;
+        border-left: 3px solid var(--line, #222);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+      .mind-row:nth-child(odd) { background: rgba(255, 255, 255, 0.02); }
+      .mind-row .when { color: var(--dim, #6b7280); white-space: nowrap; }
+      .mind-row .what { word-break: break-word; }
+      .mind-row .what b { font-weight: 600; }
+      .mind-row .why { display: block; color: var(--dim, #6b7280); }
+      .mind-row.bad { border-left-color: var(--danger); }
+      .mind-row.bad .what b { color: #fca5a5; }
+      .mind-row.waiting { border-left-color: var(--warn); }
+      .mind-empty { color: var(--dim, #6b7280); font-size: 12px; }
     </style>
   </head>
   <body>
@@ -307,7 +363,9 @@
 
     <nav>
       <button class="on" data-tab="logs">Logs</button>
+      <button data-tab="apps">Apps</button>
       <button data-tab="talk">Conversation</button>
+      <button data-tab="mind">Gamira&#8217;s mind</button>
       <button data-tab="requests">Requests<span class="count" id="req-count"></span></button>
       <button data-tab="voice">Voice</button>
       <button data-tab="cost">Cost<span class="count" id="cost-count"></span></button>
@@ -368,6 +426,25 @@
       </section>
 
       <!-- ---------------------------------------------------------------- -->
+      <!-- Windows are opened from here, not at start-up. Each one is a whole
+           separate browser — its own profile, GPU process and renderers, and in
+           the parent app's case a wake-word model running inference all the
+           time — so four of them opening before anybody asked was most of what
+           made the machine slow. Open the two you need; close them when you are
+           done. -->
+      <section class="tab" id="tab-apps">
+        <div class="bar">
+          <button class="action" data-act="open-all-windows">Open everything</button>
+          <button class="action" data-act="close-all-windows">Close all app windows</button>
+          <span class="note">
+            The console stays open. Closing a window stops its browser
+            processes; the servers behind it keep running.
+          </span>
+        </div>
+        <div class="panel" id="app-cards"></div>
+      </section>
+
+      <!-- ---------------------------------------------------------------- -->
       <section class="tab" id="tab-talk">
         <div class="bar">
           <span class="note">
@@ -376,6 +453,19 @@
           </span>
         </div>
         <div id="talk-list"></div>
+      </section>
+
+      <!-- ---------------------------------------------------------------- -->
+      <section class="tab" id="tab-mind">
+        <div class="bar">
+          <span class="note">
+            Every decision, observation and note the backend&#8217;s AI layer has
+            made, straight from the rows it wrote. Nothing here is inferred from
+            the logs, and nothing here is what anybody said &#8212; that is the
+            Conversation tab.
+          </span>
+        </div>
+        <div id="mind-list"></div>
       </section>
 
       <!-- ---------------------------------------------------------------- -->
@@ -643,6 +733,7 @@
         ["error", "Errors"],
         ["sos", "SOS"],
         ["unusual", "Unusual"],
+        ["mind", "Gamira decided"],
         ["info", "Info"],
       ];
 
@@ -696,6 +787,7 @@
           if (button.dataset.tab === "cost") loadCost();
           if (button.dataset.tab === "health") loadHealth();
           if (button.dataset.tab === "talk") loadTalk();
+          if (button.dataset.tab === "mind") loadMind();
         };
       });
 
@@ -709,7 +801,9 @@
       const VIEWS = {
         all: "",
         talk: "/live|transcript|conversation|voice|tool_call/",
-        think: "/ai\.|decision|summary|policy|prompt|gemini/",
+        think:
+          "/ai_tool_call|ai_review|ai_memory|ai_reminder|ai_family_notice|" +
+          "live_session|wellbeing_check|decision|policy|gemini/",
         care: "/dose|reminder|medication|sos|alert/",
         errors: "/error|failed|refused|denied|exception|traceback/",
       };
@@ -881,10 +975,17 @@
 
         const message = document.createElement("span");
         message.className = "msg";
-        message.innerHTML = highlighted(
-          entry.method ? entry.path || entry.text : entry.text,
-          matcher.highlight
-        );
+        // A decision row leads with what it means. The runner sends both: the
+        // English sentence in `note` and the structured fields in `text`.
+        // Showing the fields first and the sentence as a footnote made the one
+        // screen that exists to say what the AI is doing the hardest to read.
+        const lead =
+          entry.event && entry.note
+            ? entry.note
+            : entry.method
+              ? entry.path || entry.text
+              : entry.text;
+        message.innerHTML = highlighted(lead, matcher.highlight);
         row.append(message);
 
         if (entry.method) {
@@ -898,7 +999,14 @@
           row.append(status, duration);
         }
 
-        if (entry.note) {
+        if (entry.event) {
+          // The fields it was built from, kept because "she decided X" is only
+          // worth anything if the ids behind it can be checked.
+          const fields = document.createElement("span");
+          fields.className = "fields";
+          fields.textContent = entry.text;
+          row.append(fields);
+        } else if (entry.note) {
           const note = document.createElement("span");
           note.className = "note";
           note.textContent = "└─ " + entry.note;
@@ -1551,6 +1659,8 @@
           button.onclick = () => act("restart", { service: button.dataset.restart });
         });
 
+        drawApps(state.windows || [], state.logfile);
+
         $("window-cards").innerHTML = state.windows
           .map(
             (entry, index) =>
@@ -1570,6 +1680,45 @@
 
         drawPhone(state.phone);
         if (!peopleDrawn) drawPeople(state.people || []);
+      }
+
+      /**
+       * The Apps tab: one row per window, with what it is and how to open or
+       * close it.
+       *
+       * `open` is what the runner believes, and belief is the honest word:
+       * a window closed with its own X tells nobody. So Open is always
+       * offered, and Close is harmless when there is nothing to close.
+       */
+      function drawApps(windows, logfile) {
+        const rows = windows
+          .map(
+            (entry, index) =>
+              `<div class="card rowline"><div><div class="name">${escapeHtml(entry.label)}` +
+              (entry.open ? ' <span class="chip on">open</span>' : "") +
+              `</div><div class="meta">${escapeHtml(entry.url)}</div></div>` +
+              `<div class="bar"><button class="action" data-open="${index}">` +
+              (entry.open ? "Reopen" : "Open") +
+              `</button>` +
+              (entry.name === "console"
+                ? ""
+                : `<button class="action" data-close="${index}">Close</button>`) +
+              `</div></div>`
+          )
+          .join("");
+        $("app-cards").innerHTML =
+          rows +
+          (logfile
+            ? `<div class="note" style="margin-top:10px">Everything in the Logs tab is also being written to <code>${escapeHtml(
+                logfile
+              )}</code>, line by line, and stays there after this run ends.</div>`
+            : "");
+        document.querySelectorAll("[data-open]").forEach((button) => {
+          button.onclick = () => act("open-window", { index: Number(button.dataset.open) });
+        });
+        document.querySelectorAll("[data-close]").forEach((button) => {
+          button.onclick = () => act("close-window", { index: Number(button.dataset.close) });
+        });
       }
 
       // The runner resolved each person's id at start-up, so nothing here has
@@ -1632,6 +1781,166 @@
       // The one thing this console could not show was the thing the product
       // does. Requests around a voice session were visible; what was said was
       // not, because nothing kept it.
+
+      // -- Gamira's mind ---------------------------------------------------- //
+      //
+      // The question this answers is "has the AI actually done anything, and
+      // what?". Before it existed the only evidence was a 200 in the access
+      // log, which is the same evidence a page refresh leaves.
+      //
+      // Every row is a database row rendered as a sentence. The sentence is
+      // built here rather than on the server so that the raw fields stay
+      // available and nothing is lost in translation — and so that a row whose
+      // shape changes shows up as an odd sentence rather than as nothing.
+
+      const MIND_GROUPS = [
+        ["decisions", "What it decided", mindDecision],
+        ["checks", "Questions after a watch flag", mindCheck],
+        ["observations", "What it made of a conversation", mindObservation],
+        ["memories", "What it kept about somebody", mindMemory],
+        ["suggestions", "What it suggested to a family", mindSuggestion],
+        ["notices", "What it told a family", mindNotice],
+        ["usage", "What it cost, and what failed", mindUsage],
+      ];
+
+      const words = (value) => escapeHtml(String(value ?? "")).replace(/_/g, " ");
+      const who = (row) => (row.who ? ` &#183; ${escapeHtml(row.who)}` : "");
+
+      function mindDecision(row) {
+        const waiting = row.confirmation_state === "pending";
+        const failed = row.status === "failed" || row.policy_result === "denied";
+        let what = `<b>${words(row.tool_name)}</b>`;
+        if (row.policy_result === "denied") what += " &#8212; refused";
+        else if (waiting) what += " &#8212; waiting for a yes";
+        else if (row.status === "executed") what += " &#8212; done";
+        else what += ` &#8212; ${words(row.status)}`;
+        const why = row.error_code
+          ? `${words(row.error_code)}${who(row)}`
+          : `${words(row.confirmation_state)}${who(row)}`;
+        return { at: row.executed_at || row.created_at, what, why, failed, waiting };
+      }
+
+      function mindCheck(row) {
+        const pending = row.status === "pending";
+        return {
+          at: row.created_at,
+          what: `<b>${words(row.metric)}</b> &#8212; ${words(row.status)}`,
+          why: `${escapeHtml(row.reason || "")}${who(row)}`,
+          failed: row.status === "no_answer" || row.status === "unreachable",
+          waiting: pending,
+        };
+      }
+
+      function mindObservation(row) {
+        return {
+          at: row.generated_at,
+          what: `<b>${words(row.kind)}</b> &#8212; ${escapeHtml(
+            (row.content || "").slice(0, 240)
+          )}`,
+          why: `${words(row.prompt_version)} &#183; ${words(row.model)} &#183; ${words(
+            row.review_state
+          )}${who(row)}`,
+          failed: false,
+          waiting: false,
+        };
+      }
+
+      function mindMemory(row) {
+        return {
+          at: row.created_at,
+          what: `<b>${words(row.kind)}</b> &#8212; ${escapeHtml(row.content || "")}`,
+          why: row.deleted_at ? `deleted${who(row)}` : `kept${who(row)}`,
+          failed: Boolean(row.deleted_at),
+          waiting: false,
+        };
+      }
+
+      function mindSuggestion(row) {
+        return {
+          at: row.created_at,
+          what: `<b>${escapeHtml(row.title || "")}</b> at ${escapeHtml(
+            row.local_time || ""
+          )}`,
+          why: `${escapeHtml(row.suggestion_reason || "no reason recorded")}${who(row)}`,
+          failed: false,
+          waiting: true,
+        };
+      }
+
+      function mindNotice(row) {
+        return {
+          at: row.created_at,
+          what: `<b>${escapeHtml(row.title || "")}</b>`,
+          why: `${escapeHtml(row.body || "")}${who(row)}`,
+          failed: false,
+          waiting: false,
+        };
+      }
+
+      function mindUsage(row) {
+        const failed = row.outcome !== "succeeded";
+        return {
+          at: row.created_at,
+          what: `<b>${words(row.operation)}</b> &#8212; ${words(row.outcome)}`,
+          why:
+            `${words(row.model)} &#183; ${escapeHtml(row.total_tokens ?? "?")} tokens ` +
+            `&#183; ${escapeHtml(Math.round(row.latency_ms || 0))}ms` +
+            (row.error_code ? ` &#183; ${words(row.error_code)}` : ""),
+          failed,
+          waiting: false,
+        };
+      }
+
+      function mindClock(value) {
+        if (!value) return "";
+        const parsed = new Date(String(value).replace(" ", "T"));
+        return Number.isNaN(parsed.getTime())
+          ? escapeHtml(String(value).slice(0, 19))
+          : parsed.toLocaleString(undefined, {
+              month: "short",
+              day: "numeric",
+              hour: "2-digit",
+              minute: "2-digit",
+            });
+      }
+
+      async function loadMind() {
+        const list = $("mind-list");
+        try {
+          const data = await (await fetch("/api/mind")).json();
+          if (data.error) throw new Error(data.error);
+          const blocks = MIND_GROUPS.map(([key, heading, render]) => {
+            const rows = data[key] || [];
+            if (!rows.length) {
+              return (
+                `<div class="mind-group"><h3>${heading}</h3>` +
+                '<p class="mind-empty">Nothing yet.</p></div>'
+              );
+            }
+            const body = rows
+              .map((row) => {
+                const item = render(row);
+                const flag = item.failed ? " bad" : item.waiting ? " waiting" : "";
+                return (
+                  `<div class="mind-row${flag}">` +
+                  `<span class="when">${mindClock(item.at)}</span>` +
+                  `<span class="what">${item.what}` +
+                  `<span class="why">${item.why}</span></span></div>`
+                );
+              })
+              .join("");
+            return `<div class="mind-group"><h3>${heading}</h3>${body}</div>`;
+          }).join("");
+          list.innerHTML = blocks;
+        } catch (error) {
+          // Says which thing failed. "Nothing yet" for an unreachable runner
+          // would be a lie in the one place that exists to stop lies.
+          list.innerHTML =
+            '<p class="note">Could not read the database: ' +
+            escapeHtml(error.message) +
+            "</p>";
+        }
+      }
 
       async function loadTalk() {
         const list = $("talk-list");
@@ -1776,6 +2085,7 @@
           if ($("tab-requests").classList.contains("on")) loadRequests();
           if ($("tab-cost").classList.contains("on")) loadCost();
           if ($("tab-talk").classList.contains("on")) loadTalk();
+          if ($("tab-mind").classList.contains("on")) loadMind();
         }, 3000)
       );
 
