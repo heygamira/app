@@ -20,29 +20,33 @@ export default function Health() {
   const navigate = useNavigate();
   const { seniors, activeSeniorId, selectSenior } = useAuth();
   const members = useMemo(() => seniors.map(toMember), [seniors]);
-  const memberKey = members.map((m) => m.id).join(",");
 
   const [readings, setReadings] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [dir, setDir] = useState(0);
 
+  const selected = members.find((m) => m.id === activeSeniorId) || members[0] || null;
+
+  // Only the selected senior, not every member of the family: this used to
+  // fetch all of them (healthApi.listForMembers) on every poll tick
+  // regardless of which one was actually being viewed — for 4 seniors, 4
+  // requests every 30s and up to 800 rows transferred for one visible chart.
   const load = useCallback(async () => {
-    if (!members.length) {
+    if (!selected) {
+      setReadings([]);
       setLoading(false);
       return;
     }
     try {
-      setReadings(await healthApi.listForMembers(members, { limit: 200 }));
+      setReadings(await healthApi.list(selected.id, selected.name, { limit: 200 }));
       setError("");
     } catch (err) {
       setError(err.message);
     } finally {
       setLoading(false);
     }
-    // members is rebuilt on every render; the ids are what actually change.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [memberKey]);
+  }, [selected]);
 
   useEffect(() => {
     load();
@@ -51,8 +55,6 @@ export default function Health() {
   // Readings arrive from a paired watch between renders, so this screen keeps
   // reading while it is open.
   usePoll(load, HEALTH_POLL_MS);
-
-  const selected = members.find((m) => m.id === activeSeniorId) || members[0] || null;
 
   const switchMember = (d) => {
     const idx = members.findIndex((m) => m.id === selected?.id);
@@ -114,7 +116,7 @@ export default function Health() {
               >
                 <MemberHealthSection
                   member={selected}
-                  readings={readings.filter((r) => r.family_member_id === selected.id)}
+                  readings={readings}
                 />
               </motion.div>
             )}

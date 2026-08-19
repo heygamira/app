@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   alerts as alertsApi,
   events as eventsApi,
@@ -15,6 +15,12 @@ import { usePoll } from "@/lib/usePoll";
 const ALERT_SAFETY_POLL_MS = 60_000;
 // How long to wait before trying to reconnect a dropped event stream.
 const RECONNECT_DELAY_MS = 3000;
+// A burst of events (an SOS plus its own delivery-attempt notices, several
+// device readings crossing their band in the same second) used to trigger one
+// full reload per event, overlapping in flight. The first event in a burst
+// still reloads immediately; anything else arriving within this window
+// coalesces into one trailing reload instead of one each.
+const EVENT_DEBOUNCE_MS = 500;
 
 // An SOS and its escalations are the same emergency. A repeat must raise the
 // same red banner, or "nobody answered" would be quieter than the first press.
@@ -112,10 +118,32 @@ export function useAlerts() {
   // reconnecting a few seconds too eagerly after a blip costs nothing that
   // matters, and simplicity here is worth more than tuning a backoff curve
   // for a connection that is expected to just stay up.
+  const debounceTimerRef = useRef(null);
+  const debouncedReloadPendingRef = useRef(false);
+
   useEffect(() => {
     if (!familyId) return undefined;
     const controller = new AbortController();
     let stopped = false;
+
+    // Leading + trailing: the first event in a quiet period reloads at once,
+    // so a single SOS is still instant. Anything else arriving before the
+    // window closes is coalesced into one reload when it does, rather than
+    // each firing its own overlapping request.
+    const reloadDebounced = () => {
+      if (debounceTimerRef.current) {
+        debouncedReloadPendingRef.current = true;
+        return;
+      }
+      load();
+      debounceTimerRef.current = setTimeout(() => {
+        debounceTimerRef.current = null;
+        if (debouncedReloadPendingRef.current) {
+          debouncedReloadPendingRef.current = false;
+          load();
+        }
+      }, EVENT_DEBOUNCE_MS);
+    };
 
     (async () => {
       while (!stopped) {
@@ -125,7 +153,7 @@ export function useAlerts() {
           for await (const _event of eventsApi.stream(familyId, {
             signal: controller.signal,
           })) {
-            load();
+            reloadDebounced();
           }
         } catch {
           // Dropped, or the family changed under us. Either way, reconnect
@@ -139,6 +167,11 @@ export function useAlerts() {
     return () => {
       stopped = true;
       controller.abort();
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
+      debouncedReloadPendingRef.current = false;
     };
   }, [familyId, load]);
 
