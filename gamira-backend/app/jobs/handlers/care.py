@@ -17,7 +17,7 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
@@ -41,6 +41,7 @@ from app.models.enums import (
 )
 from app.models.identity import FamilyMembership, SeniorProfile
 from app.models.medication import DoseEvent, Medication
+from app.models.rate_limit import RateLimitEvent
 from app.services import alerts as alert_service
 from app.services import doses as dose_service
 from app.services import wellbeing as wellbeing_service
@@ -597,6 +598,28 @@ async def escalate_wellbeing_checks(ctx: JobContext) -> JobResult:
 
 
 # --------------------------------------------------------------------------- #
+# Rate limiting
+# --------------------------------------------------------------------------- #
+
+
+@handler(JobType.RATE_LIMIT_CLEANUP)
+async def clean_up_rate_limit_events(ctx: JobContext) -> JobResult:
+    """Delete rate-limit rows nothing will ever count again.
+
+    Every window configured in ``app.api.rate_limit`` is an hour or less, so a
+    day-old row is not part of any window's count no matter when this last
+    ran — a generous margin, not a precisely-tuned one, since getting it wrong
+    in the direction of "keeps rows a little too long" costs nothing but a
+    slightly larger table between sweeps.
+    """
+    cutoff = utcnow() - dt.timedelta(days=1)
+    result = await ctx.session.execute(
+        delete(RateLimitEvent).where(RateLimitEvent.occurred_at < cutoff)
+    )
+    return JobResult(metrics={"rate_limit_events_deleted": result.rowcount})
+
+
+# --------------------------------------------------------------------------- #
 # Shared
 # --------------------------------------------------------------------------- #
 
@@ -634,6 +657,7 @@ async def _target_seniors(ctx: JobContext) -> list[SeniorProfile]:
 __all__ = [
     "advance_dose_statuses",
     "check_alert_escalations",
+    "clean_up_rate_limit_events",
     "deliver_notification",
     "materialize_doses",
     "process_reminder_occurrences",

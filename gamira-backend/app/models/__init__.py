@@ -35,6 +35,7 @@ from app.models.identity import (
 )
 from app.models.jobs import BackgroundJob
 from app.models.medication import DoseEvent, Medication, MedicationSchedule
+from app.models.rate_limit import RateLimitEvent
 
 __all__ = [
     "AiDecision",
@@ -59,6 +60,7 @@ __all__ = [
     "MedicationSchedule",
     "NotificationDelivery",
     "NotificationDeliveryAttempt",
+    "RateLimitEvent",
     "RegisteredDevice",
     "Reminder",
     "SeniorProfile",

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import uuid
+from typing import Annotated
 
 from fastapi import APIRouter, status
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import CurrentUser, SessionDep
+from app.api.rate_limit import rate_limit
 from app.api.v1.medications import _dose_out, _resolve_window
 from app.core.errors import Conflict, NotFound
 from app.db.base import utcnow
@@ -139,6 +141,9 @@ async def create_invitation(
     payload: InvitationCreate,
     session: SessionDep,
     user: CurrentUser,
+    _rate_limit: Annotated[
+        None, rate_limit("invitation_create", limit=20, window_seconds=3600)
+    ],
 ) -> InvitationCreated:
     """Issue an invitation. Only an owner may grant the owner role."""
     membership = await require_membership(
@@ -194,7 +199,12 @@ async def create_invitation(
 
 @router.post("/invitations/{token}/accept", response_model=MemberOut)
 async def accept_invitation(
-    token: str, session: SessionDep, user: CurrentUser
+    token: str,
+    session: SessionDep,
+    user: CurrentUser,
+    _rate_limit: Annotated[
+        None, rate_limit("invitation_accept", limit=20, window_seconds=3600)
+    ],
 ) -> MemberOut:
     membership = await identity_service.accept_invitation(
         session, raw_token=token, user=user

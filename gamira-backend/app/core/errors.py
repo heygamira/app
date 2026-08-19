@@ -84,6 +84,12 @@ class DependencyUnavailable(ApiError):
     message = "A required dependency is unavailable."
 
 
+class RateLimited(ApiError):
+    status_code = status.HTTP_429_TOO_MANY_REQUESTS
+    code = "rate_limited"
+    message = "Too many requests. Wait a moment and try again."
+
+
 def error_response(
     *,
     status_code: int,

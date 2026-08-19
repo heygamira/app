@@ -32,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.ai.persona import PERSONA_VERSION, build_system_instruction, resolve_model
 from app.ai.tools import PARENT_APP_TOOLS, tool_snapshot
 from app.core.config import Settings, get_settings
-from app.core.errors import ApiError, DependencyUnavailable
+from app.core.errors import DependencyUnavailable, RateLimited
 from app.core.logging import current_request_id, get_logger
 from app.db.base import utcnow
 from app.jobs.queue import enqueue_job
@@ -54,11 +54,10 @@ logger = get_logger(__name__)
 # the browser's final `keepalive` transcript post to land.
 REVIEW_DELAY_SECONDS = 30
 
-
-class RateLimited(ApiError):
-    status_code = 429
-    code = "rate_limited"
-    message = "Too many voice sessions. Wait a moment and try again."
+# RateLimited now lives in app.core.errors, shared with app.core.rate_limit for
+# the endpoints in item 4 of the staging-hardening pass — imported above and
+# still exported from here (see __all__) so existing call sites in this module
+# and any external `from app.ai.live import RateLimited` keep working.
 
 
 @dataclass(frozen=True)

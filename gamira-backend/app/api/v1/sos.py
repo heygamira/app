@@ -17,11 +17,13 @@ acknowledge, resolve or cancel what the button produced.
 from __future__ import annotations
 
 import uuid
+from typing import Annotated
 
 from fastapi import APIRouter, Query, status
 from sqlalchemy import select
 
 from app.api.deps import CurrentUser, SessionDep
+from app.api.rate_limit import rate_limit
 from app.core.errors import NotFound, PermissionDenied
 from app.jobs.queue import URGENT_PRIORITY, enqueue_job
 from app.jobs.types import JobType
@@ -58,6 +60,9 @@ async def raise_sos(
     payload: SosAlertCreate,
     session: SessionDep,
     user: CurrentUser,
+    _rate_limit: Annotated[
+        None, rate_limit("sos_raise", limit=10, window_seconds=3600)
+    ],
 ) -> SosAlertOut:
     """Raise an emergency alert for one person.
 
@@ -69,6 +74,10 @@ async def raise_sos(
 
     Nothing in this path touches an AI provider or a network service. It writes
     rows, and it works when everything else is down.
+
+    Rate-limited loosely (10/hour) purely to blunt an accidental retry storm
+    or a compromised token — this must never meaningfully block a real
+    emergency, so the limit is deliberately far above any plausible real use.
     """
     await require_self_or_write_access(
         session, user_id=user.id, senior_profile_id=senior_id

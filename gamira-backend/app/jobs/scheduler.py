@@ -50,6 +50,10 @@ SCHEDULES: tuple[Schedule, ...] = (
     # Transcripts do not live forever. Hourly is plenty for a rule measured in
     # days, and cheap when there is nothing past its window.
     Schedule(JobType.CONVERSATION_RETENTION, interval_seconds=3600),
+    # Every rate-limit window in app.api.rate_limit is an hour or less, so
+    # anything older than a day is definitely past every window and safe to
+    # sweep. Hourly, same reasoning as conversation retention above.
+    Schedule(JobType.RATE_LIMIT_CLEANUP, interval_seconds=3600),
 )
 
 

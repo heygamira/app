@@ -21,10 +21,12 @@ dangerous, and nothing here is a clinical judgement.
 from __future__ import annotations
 
 import uuid
+from typing import Annotated
 
 from fastapi import APIRouter, status
 
 from app.api.deps import CurrentUser, SessionDep
+from app.api.rate_limit import rate_limit
 from app.core.errors import NotFound
 from app.db.base import utcnow
 from app.models.enums import NotificationType
@@ -43,13 +45,19 @@ router = APIRouter(tags=["devices"])
 
 @router.post("/devices", response_model=DeviceOut, status_code=status.HTTP_201_CREATED)
 async def register_device(
-    payload: DeviceRegister, session: SessionDep, user: CurrentUser
+    payload: DeviceRegister,
+    session: SessionDep,
+    user: CurrentUser,
+    _rate_limit: Annotated[
+        None, rate_limit("device_register", limit=30, window_seconds=3600)
+    ],
 ) -> DeviceOut:
     """Register or refresh this installation, and rotate its push token.
 
     Safe to call on every app start. The same ``install_id`` updates the
     existing row rather than adding another, so a person who has used one phone
-    for a year has one device record.
+    for a year has one device record. The limit is loose (30/hour) — this only
+    needs to catch a runaway client loop, not normal use.
     """
     device, created = await device_service.register_device(
         session,

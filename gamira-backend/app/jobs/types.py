@@ -23,6 +23,9 @@ class JobType:
     # unanswered wellbeing check is a rule about elapsed time, and it must
     # still run with every model in the world unreachable.
     WELLBEING_CHECK_ESCALATE: Final = "wellbeing.escalate"
+    # Sweeps app.models.rate_limit.RateLimitEvent rows older than any
+    # configured window. Needs nothing but the database, hence care.py, not ai.py.
+    RATE_LIMIT_CLEANUP: Final = "rate_limit.cleanup"
 
     # AI. Every one of these may fail without affecting the list above.
     AI_WEEKLY_SUMMARY: Final = "ai.weekly_summary"
