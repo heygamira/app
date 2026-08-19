@@ -315,3 +315,20 @@ class DashboardSummaryOut(BaseModel):
     timeline: list[TimelineEventOut]
     appointments: list[AppointmentOut]
     reminders: list[ReminderOut]
+
+
+class SeniorSummaryOut(BaseModel):
+    """Everything the Parent App's always-on voice provider needs for one
+    person, in one response.
+
+    Replaces four separate polls (doses, reminders, emergency contacts, and
+    pending wellbeing checks) with one, the same "fan-in of already-authorized
+    reads" the Family Dashboard's ``DashboardSummaryOut`` already is — scoped
+    to a single senior rather than a whole family, since that is what the
+    Parent App has ever needed.
+    """
+
+    doses: list[DoseEventOut]
+    reminders: list[ReminderOut]
+    emergency_contacts: list[EmergencyContactOut]
+    wellbeing_checks: list[WellbeingCheckOut]

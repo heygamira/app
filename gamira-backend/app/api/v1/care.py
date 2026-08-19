@@ -8,8 +8,10 @@ from typing import TypeVar
 
 from fastapi import APIRouter, Query, status
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from app.api.deps import CurrentUser, SessionDep
+from app.api.v1.medications import _dose_out, _resolve_window
 from app.core.errors import NotFound, ValidationFailed
 from app.db.base import Base, utcnow
 from app.jobs.queue import URGENT_PRIORITY, enqueue_job
@@ -33,6 +35,7 @@ from app.models.enums import (
     WellbeingCheckStatus,
 )
 from app.models.identity import SeniorProfile
+from app.models.medication import DoseEvent
 from app.schemas.care import (
     METRIC_UNITS,
     AppointmentCreate,
@@ -50,6 +53,7 @@ from app.schemas.care import (
     ReminderCreate,
     ReminderOut,
     ReminderUpdate,
+    SeniorSummaryOut,
     TimelineEventOut,
     WellbeingCheckAnswer,
     WellbeingCheckOut,
@@ -68,6 +72,72 @@ router = APIRouter(tags=["care"])
 MAX_PAGE_SIZE = 200
 
 ModelT = TypeVar("ModelT", bound=Base)
+
+
+# --------------------------------------------------------------------------- #
+# Summary
+# --------------------------------------------------------------------------- #
+
+
+@router.get("/seniors/{senior_id}/summary", response_model=SeniorSummaryOut)
+async def get_senior_summary(
+    senior_id: uuid.UUID, session: SessionDep, user: CurrentUser
+) -> SeniorSummaryOut:
+    """Today's doses, active reminders, emergency contacts and pending
+    wellbeing checks for one person, in a single request.
+
+    A fan-in of four already-authorized reads, not a new authorization
+    surface: one `resolve_senior` call scopes every query below to this
+    senior, exactly as `list_reminders`, `list_emergency_contacts` and
+    `list_wellbeing_checks` in this file already do individually. Built for
+    the Parent App's always-on voice provider, which previously polled the
+    four underlying endpoints separately every few seconds — see
+    `DashboardSummaryOut` above for the Family Dashboard's equivalent.
+    """
+    senior, _ = await resolve_senior(session, user_id=user.id, senior_id=senior_id)
+    window_start, window_end = _resolve_window(senior.timezone, None, None)
+
+    dose_rows = await session.execute(
+        select(DoseEvent)
+        .options(selectinload(DoseEvent.medication), selectinload(DoseEvent.schedule))
+        .where(
+            DoseEvent.senior_profile_id == senior.id,
+            DoseEvent.scheduled_at_utc >= window_start,
+            DoseEvent.scheduled_at_utc < window_end,
+        )
+        .order_by(DoseEvent.scheduled_at_utc)
+    )
+    reminder_rows = await session.execute(
+        select(Reminder)
+        .where(
+            Reminder.senior_profile_id == senior_id,
+            Reminder.status != ReminderStatus.ARCHIVED,
+        )
+        .order_by(Reminder.local_time.nulls_last(), Reminder.created_at)
+    )
+    contact_rows = await session.execute(
+        select(EmergencyContact)
+        .where(EmergencyContact.senior_profile_id == senior_id)
+        .order_by(EmergencyContact.priority, EmergencyContact.created_at)
+    )
+    wellbeing_rows = await session.execute(
+        select(WellbeingCheck)
+        .where(
+            WellbeingCheck.senior_profile_id == senior_id,
+            WellbeingCheck.status == WellbeingCheckStatus.PENDING,
+        )
+        .order_by(WellbeingCheck.created_at.desc())
+        .limit(20)
+    )
+
+    return SeniorSummaryOut(
+        doses=[_dose_out(event) for event in dose_rows.scalars().unique()],
+        reminders=[ReminderOut.model_validate(row) for row in reminder_rows.scalars()],
+        emergency_contacts=[
+            EmergencyContactOut.model_validate(row) for row in contact_rows.scalars()
+        ],
+        wellbeing_checks=[_wellbeing_out(row) for row in wellbeing_rows.scalars()],
+    )
 
 
 # --------------------------------------------------------------------------- #
