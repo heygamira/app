@@ -40,7 +40,7 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
                     "request_failed",
                     extra={
                         "method": request.method,
-                        "path": request.url.path,
+                        "path": _route_path(request),
                         "duration_ms": _elapsed_ms(started),
                     },
                 )
@@ -51,7 +51,7 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
                 "request_completed",
                 extra={
                     "method": request.method,
-                    "path": request.url.path,
+                    "path": _route_path(request),
                     "status_code": response.status_code,
                     "duration_ms": _elapsed_ms(started),
                 },
@@ -59,6 +59,18 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
             return response
         finally:
             request_id_var.reset(token)
+
+
+def _route_path(request: Request) -> str:
+    """The matched route template (``/seniors/{senior_id}/doses``) rather than
+    the raw path with resource ids inline — every request to that endpoint
+    then aggregates under one log key instead of one per id, and no id leaks
+    into logs incidentally. Falls back to the raw path for a genuine 404,
+    where no route ever matched.
+    """
+    route = request.scope.get("route")
+    path = getattr(route, "path", None)
+    return path if isinstance(path, str) else request.url.path
 
 
 def _elapsed_ms(started: float) -> float:
