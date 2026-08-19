@@ -29,7 +29,11 @@ class Settings(BaseSettings):
     app_name: str = "Gamira API"
     api_port: int = 8000
     api_prefix: str = "/api/v1"
-    debug: bool = False
+    # Bound to GAMIRA_DEBUG rather than the bare DEBUG name: DEBUG is a common
+    # machine- or tool-level environment variable (npm's debug package, various
+    # shells, IDEs) that is often not "true"/"false"/"1"/"0", and pydantic
+    # crashes settings loading rather than ignoring an unparseable bool.
+    debug: bool = Field(default=False, validation_alias="GAMIRA_DEBUG")
 
     # postgresql+asyncpg://... in every real environment. The sqlite+aiosqlite
     # form exists so the test suite and a first checkout run without Docker.

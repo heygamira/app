@@ -2717,6 +2717,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Throw away the browser profiles first (signs every window out).",
     )
+    parser.add_argument(
+        "--real-push",
+        action="store_true",
+        help=(
+            "Use the real FCM provider instead of the fake one, so a "
+            "registered device actually receives a push. Reads FCM_PROVIDER, "
+            "FCM_CREDENTIALS_FILE and FCM_PROJECT_ID from gamira-backend/.env "
+            "instead of forcing FCM_PROVIDER=fake."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -2839,23 +2849,28 @@ def main() -> int:
     scheme = "https" if tls else "http"
 
     # The API's own settings. Passed as environment rather than written to
-    # .env, so nothing on disk changes. DEBUG is set explicitly because a
-    # machine-level DEBUG value that is not a boolean stops settings loading.
+    # .env, so nothing on disk changes.
     api_env = {
         "APP_ENV": "local",
         "API_PORT": str(api_port),
-        "DEBUG": "false",
+        "GAMIRA_DEBUG": "false",
         "AUTH_MODE": "dev",
         "LOG_FORMAT": "console",
         "LOG_LEVEL": "INFO",
-        # Push is not configured locally. "fake" records the attempt and its
-        # outcome without pretending anything reached a phone.
-        "FCM_PROVIDER": "fake",
         # With a key present the backend mints real Live tokens itself, at
         # POST /api/v1/ai/live-sessions. Without one it uses the deterministic
         # fake provider, and every non-AI path still works.
         "AI_PROVIDER": "gemini" if voice_on else "fake",
     }
+    if args.real_push:
+        # Leave FCM_PROVIDER/FCM_CREDENTIALS_FILE/FCM_PROJECT_ID unset here so
+        # pydantic-settings falls through to whatever gamira-backend/.env
+        # actually has configured, instead of the fake default below.
+        say("--real-push: FCM_PROVIDER comes from gamira-backend/.env, not the fake default.")
+    else:
+        # Push is not configured locally by default. "fake" records the
+        # attempt and its outcome without pretending anything reached a phone.
+        api_env["FCM_PROVIDER"] = "fake"
     if voice_on:
         api_env["GEMINI_API_KEY"] = os.environ.get("GEMINI_API_KEY", "")
 
