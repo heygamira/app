@@ -45,7 +45,7 @@ async def family_events(
                         queue.get(), timeout=HEARTBEAT_SECONDS
                     )
                     yield f"data: {json.dumps(event)}\n\n"
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     yield ": heartbeat\n\n"
         finally:
             realtime.unsubscribe(family_id, queue)

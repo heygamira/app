@@ -376,17 +376,23 @@ class GeminiProvider:
         # the SDK's own Schema type, which has no `additionalProperties` field —
         # the same distinction `app/ai/live.py::_declaration` documents for tool
         # declarations. The fallback keeps working if a future SDK drops it.
-        schema_field = (
-            "response_json_schema"
-            if "response_json_schema" in types.GenerateContentConfig.model_fields
-            else "response_schema"
-        )
-        config = types.GenerateContentConfig(
-            system_instruction=prompt.system,
-            response_mime_type="application/json",
-            temperature=0.2,
-            **{schema_field: schema},
-        )
+        # A dynamically-keyed **kwargs spread here defeats mypy's ability to
+        # match the key against GenerateContentConfig's many optional fields,
+        # so the two known field names are constructed explicitly instead.
+        if "response_json_schema" in types.GenerateContentConfig.model_fields:
+            config = types.GenerateContentConfig(
+                system_instruction=prompt.system,
+                response_mime_type="application/json",
+                temperature=0.2,
+                response_json_schema=schema,
+            )
+        else:
+            config = types.GenerateContentConfig(
+                system_instruction=prompt.system,
+                response_mime_type="application/json",
+                temperature=0.2,
+                response_schema=schema,
+            )
         try:
             response = await asyncio.wait_for(
                 self._get_client().aio.models.generate_content(

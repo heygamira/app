@@ -115,7 +115,7 @@ async def gather(
         )
     ).scalars()
     turns = [
-        (_ROLE_WORDS[row.role], row.content)
+        (_ROLE_WORDS[row.role], row.content or "")
         for row in reversed(list(rows))
         if row.role in _ROLE_WORDS and (row.content or "").strip()
     ]

@@ -403,7 +403,7 @@ async def dashboard_summary(
     # request for each of them.
     fan_out = max(1, len(seniors))
 
-    doses = []
+    doses: list[DoseEventOut] = []
     for senior in seniors:
         window_start, window_end = _resolve_window(senior.timezone, None, None)
         rows = await session.execute(

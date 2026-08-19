@@ -624,7 +624,9 @@ async def list_family_notices(
         FamilyNoticeOut(
             id=group[0].id,
             title=group[0].title,
-            body=group[0].body,
+            # Nullable on the model generally; every family_update notice sets
+            # it, but the response schema still needs a concrete str.
+            body=group[0].body or "",
             created_at=group[0].created_at,
             recipients=len(group),
         )

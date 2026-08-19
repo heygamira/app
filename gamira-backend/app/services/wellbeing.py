@@ -112,7 +112,10 @@ async def open_check(
         extra={
             "check_id": str(check.id),
             "metric": metric,
-            "escalate_at": check.escalate_at.isoformat(),
+            # Nullable on the model (a check can be resolved and its
+            # escalation cancelled), but always set on the row just created
+            # above.
+            "escalate_at": check.escalate_at.isoformat() if check.escalate_at else None,
         },
     )
     return check

@@ -30,6 +30,7 @@ notification is a worse failure than the one this whole phase exists to fix.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import uuid
 
 _subscribers: dict[uuid.UUID, set[asyncio.Queue]] = {}
@@ -78,11 +79,9 @@ def publish_family_event(
         "entity_id": str(entity_id) if entity_id else None,
     }
     for queue in list(subscribers):
-        try:
+        # A full queue means this subscriber has fallen behind. Dropping the
+        # event is the right call: it will reconnect and re-fetch, and
+        # blocking here would turn a slow dashboard tab into a slow SOS write
+        # for everyone else in the family.
+        with contextlib.suppress(asyncio.QueueFull):
             queue.put_nowait(event)
-        except asyncio.QueueFull:
-            # This subscriber has fallen behind. Dropping the event is the
-            # right call: it will reconnect and re-fetch, and blocking here
-            # would turn a slow dashboard tab into a slow SOS write for
-            # everyone else in the family.
-            pass
