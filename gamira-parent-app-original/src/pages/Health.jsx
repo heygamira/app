@@ -76,6 +76,7 @@ export default function Health() {
                     unit={card.unit}
                     data={card.spark}
                     sparkColor={card.sparkColor}
+                    stale={card.stale}
                   />
                 ))}
               </div>

@@ -162,12 +162,19 @@ export function extractFunctionCalls(message) {
  *        keeps what was said. Batched every few seconds and once on the way out.
  * @param {(sessionId: string, calls: Array<object>) => Promise<object>} [opts.sendToolCalls]
  * @param {(name: string, args: object) => Promise<object>} [opts.dispatchClientTool]
+ * @param {(result: {name: string, response: object}) => void} [opts.onToolResult]
+ *        a backend tool finished. The app watches this so something done by
+ *        voice can be reflected on the screen the person is looking at.
  * @param {(request: object) => void} [opts.onConfirmationRequired]
  * @param {(resolved: {decisionId: string, response: object}) => void} [opts.onConfirmationResolved]
  *        a confirmation was answered out loud rather than on screen
  * @param {string} [opts.usageUrl]
  * @param {(s: string) => void} [opts.onStatus]      'connecting'|'listening'|'speaking'|'working'|'closed'
  * @param {(t: string) => void} [opts.onTranscript]  model transcript text, streamed
+ * @param {(t: string, meta?: {live?: boolean}) => void} [opts.onUserTranscript]
+ *        what the *person* said. Called with `{live: true}` for the interim
+ *        transcript that updates while they are still speaking, and again
+ *        without it when the server finalises the sentence.
  * @param {() => void} [opts.onTurnEnd]              the model finished or was cut off
  * @param {(u: object) => void} [opts.onUsage]       cumulative token usage for this session
  * @param {(info: object) => void} [opts.onSession]  the backend session, once created
@@ -182,8 +189,16 @@ export function extractFunctionCalls(message) {
  * @param {boolean} [opts.autoStream]   start sending audio as soon as the socket
  *        opens. False keeps the session connected but silent until
  *        `beginStreaming()` — which is how the wake word pre-connects.
+ * @param {string | null} [opts.openingBrief]  a bracketed note telling Gamira
+ *        why the app opened this conversation. Sent as the first turn, so she
+ *        speaks before anybody has said anything to her.
+ * @param {boolean} [opts.listenAfterBrief]  open the microphone once she has
+ *        finished the opening brief. False means she says her piece and the
+ *        session stays silent, which is what a pure announcement would be.
  * @param {() => void} [opts.onOpen]    the socket reached a usable state
- * @returns {{stop: () => void, resolveConfirmation: (decisionId: string, response: object) => void}}
+ * @returns {{stop: () => void, beginStreaming: () => void,
+ *   prependAudio: (pcm: Int16Array) => void, brief: (text: string) => void,
+ *   resolveConfirmation: (decisionId: string, response: object) => void}}
  */
 export function startVoiceSession({
   createSession = null,
@@ -196,6 +211,8 @@ export function startVoiceSession({
   usageUrl = DEFAULT_USAGE_URL,
   onStatus = () => {},
   onTranscript = () => {},
+  onUserTranscript = () => {},
+  onToolResult = () => {},
   onTurnEnd = () => {},
   onUsage = () => {},
   onSession = () => {},
@@ -207,6 +224,8 @@ export function startVoiceSession({
   audioSource = null,
   provisional = false,
   autoStream = true,
+  openingBrief = null,
+  listenAfterBrief = true,
 } = {}) {
   let stopped = false;
   let session = null;
@@ -243,6 +262,14 @@ export function startVoiceSession({
   // How many times playback ran dry. Surfaced on the handle so a stuttering
   // connection is measurable rather than a matter of opinion.
   let underruns = 0;
+  // A goodbye in progress: she is finishing a sentence and the session closes
+  // when she has. See `finish()`.
+  let finishing = null;
+  // When the far end last sent anything for this turn — audio or transcript.
+  // `finish()` needs it: a tool call usually arrives *before* the audio of the
+  // sentence it was called in, so "is she speaking right now" is false at
+  // exactly the moment the goodbye has to be waited for.
+  let lastContentAt = 0;
   let opened = false; // did the socket ever reach a usable state?
 
   // Tool-call bookkeeping.
@@ -300,6 +327,8 @@ export function startVoiceSession({
   };
 
   const cleanup = () => {
+    finishing?.cancel();
+    finishing = null;
     // Before `stopped`, or the flush refuses to run — and this is the flush
     // that carries the end of the conversation.
     flushTranscript({ final: true });
@@ -411,6 +440,7 @@ export function startVoiceSession({
 
   const play = (base64) => {
     if (stopped || !playbackCtx) return;
+    lastContentAt = Date.now();
     const pcm = base64ToInt16(base64);
     if (!pcm.length) return;
 
@@ -598,6 +628,17 @@ export function startVoiceSession({
         if (resolved && awaitingConfirmation.delete(resolved)) {
           onConfirmationResolved({ decisionId: resolved, response: result.response });
         }
+        // Something happened to the record, by voice, on whatever screen they
+        // are looking at. Until this existed the screen only heard about
+        // changes that went through a confirmation dialog — so an alert
+        // withdrawn out loud left its own "your family knows" dialog sitting
+        // there, saying something that was no longer true.
+        try {
+          onToolResult({ name: call.name, response: result.response });
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn('Gamira voice: a screen could not handle a tool result', err);
+        }
         sendToolResponse(call, result.response);
       }
     } catch (err) {
@@ -657,6 +698,68 @@ export function startVoiceSession({
   };
 
   const handle = {
+    /**
+     * End the conversation once she has finished saying goodbye.
+     *
+     * `stop()` is immediate and correct for a button: somebody who pressed
+     * stop wants it stopped. It is wrong for the word "bye", which is the
+     * other way people end a conversation — the model says "talk to you
+     * later" and calls `end_conversation` in the same turn, and tearing the
+     * session down on the tool call cut her off mid-word every time. The
+     * audio for that sentence is *already scheduled* in the playback graph;
+     * `cleanup` stops every node in it.
+     *
+     * So: stop listening at once — nothing said after goodbye is meant for
+     * her — then wait for the turn to complete and the scheduled audio to
+     * drain, and close. `TIMEOUT` is the backstop, because a session that
+     * will not close is worse than one word clipped.
+     */
+    finish() {
+      if (stopped) return;
+      if (finishing) return;
+      streaming = false;
+      pending = [];
+
+      const TIMEOUT = 12_000;
+      // Nothing from the far end for this long, with nothing left to play,
+      // means the turn is over whether or not `turnComplete` ever arrived.
+      // Needed because a tool call typically arrives before the audio of the
+      // sentence it belongs to: `speaking` is false at that moment, and
+      // treating that as "she has finished" closes the session before she has
+      // said a word — which is the bug this whole method exists for.
+      const QUIET_MS = 2500;
+      const startedAt = Date.now();
+      let turnDone = false;
+      let timer = null;
+
+      const drained = () =>
+        !queued.length &&
+        (!playbackCtx || playHead <= playbackCtx.currentTime + 0.05);
+      const quiet = () => Date.now() - Math.max(lastContentAt, startedAt) > QUIET_MS;
+
+      const check = () => {
+        timer = null;
+        if (stopped) return;
+        if (((turnDone || quiet()) && drained()) || Date.now() - startedAt > TIMEOUT) {
+          finishing = null;
+          handle.stop();
+          return;
+        }
+        timer = setTimeout(check, 120);
+      };
+
+      finishing = {
+        turnEnded() {
+          turnDone = true;
+        },
+        cancel() {
+          if (timer) clearTimeout(timer);
+          timer = null;
+        },
+      };
+      check();
+    },
+
     stop() {
       if (stopped) return;
       const sessionId = backendSessionId;
@@ -716,6 +819,20 @@ export function startVoiceSession({
           : '[They answered on the screen: no. Nothing was changed.]'
       );
       if (micLive()) onStatus('listening');
+    },
+
+    /**
+     * Say something the app has decided needs saying, in an open session.
+     *
+     * The same bracketed-note mechanism as the opening brief, for the case
+     * where the reason arrives after the conversation started — a watch flag
+     * landing mid-chat, an SOS countdown starting while she is already
+     * talking. The persona knows a bracketed note is the app speaking and not
+     * the person, and is told never to read one out.
+     */
+    brief(text) {
+      if (stopped || !text) return;
+      notify(text);
     },
 
     get sessionId() {
@@ -797,14 +914,22 @@ export function startVoiceSession({
         config: {
           responseModalities: [Modality.AUDIO],
           outputAudioTranscription: {},
+          // Asked for here as well as pinned into the token. This object
+          // *replaces* the token's setup config rather than merging with it,
+          // so leaving it out was quietly narrowing what the backend had
+          // already decided — and the person's own side of the transcript is
+          // the half this app is for.
+          inputAudioTranscription: {},
         },
         callbacks: {
           onopen: () => {
             opened = true;
             onOpen();
-            // A session opened speculatively stays connected and silent until
-            // the wake word is actually confirmed, so it must not announce
-            // itself as listening — nothing is being sent yet.
+            // The opening brief is *not* sent from here. This callback runs
+            // inside `await ai.live.connect(...)`, before `session` has been
+            // assigned, so `notify` would hit its own `!session` guard and
+            // drop it — silently, which is the worst way for a feature whose
+            // whole job is to speak first to fail. It goes below instead.
             if (streaming) {
               flushPending(inputRate);
               onStatus('listening');
@@ -839,17 +964,45 @@ export function startVoiceSession({
               if (part.inlineData?.data) play(part.inlineData.data);
             }
             if (content.outputTranscription?.text) {
+              lastContentAt = Date.now();
               onTranscript(content.outputTranscription.text);
               recordTurn('assistant', content.outputTranscription.text);
             }
-            // The person's own words. Nothing transcribed these before, so a
-            // conversation left no trace of the half that mattered most.
+            // The person's own words. These were being recorded for the
+            // backend and shown to nobody, so the screen carried half a
+            // conversation — which reads, to somebody who was not sure they
+            // had been heard, exactly like not being heard.
+            //
+            // Two fields, and the difference is the whole reason their side of
+            // the screen looked broken. `inputTranscription` is the *finalised*
+            // transcript and arrives at the end of what they said — by which
+            // time Gamira has usually started answering, so it was being
+            // overwritten within a frame. `interimInputTranscription` is the
+            // live one, updated while they are still speaking, and nothing was
+            // reading it.
+            //
+            // The interim goes to the screen only. What is stored is the
+            // final: a record built from half-heard guesses would be a worse
+            // record than none.
+            if (content.interimInputTranscription?.text) {
+              onUserTranscript(content.interimInputTranscription.text, { live: true });
+            }
             if (content.inputTranscription?.text) {
+              onUserTranscript(content.inputTranscription.text);
               recordTurn('user', content.inputTranscription.text);
             }
             if (content.turnComplete) {
               speaking = false;
               onTurnEnd();
+              // She has finished the sentence a goodbye was waiting on. What
+              // is left is the audio already scheduled, which `finish` drains.
+              finishing?.turnEnded();
+              // She has said her piece. Now, and only now, does the person get
+              // a microphone — for as long as the caller leaves the session
+              // open, which for a proactive one is a short listening window.
+              if (openingBrief && !streaming && listenAfterBrief) {
+                handle.beginStreaming();
+              }
               if (micLive()) onStatus('listening');
             }
           },
@@ -875,6 +1028,21 @@ export function startVoiceSession({
         },
       });
       if (stopped) return;
+
+      // Gamira going first. The brief is a bracketed note the app builds from
+      // what is already on the person's screen — a dose that is late, a
+      // countdown that is running — so the model words it rather than
+      // inventing it.
+      //
+      // Nothing has been said to her, so there is no turn to answer: this
+      // *is* the turn. The microphone stays shut until she has finished
+      // speaking (see `turnComplete` above), because a session that opened a
+      // microphone before saying why would be the microphone turning itself
+      // on in somebody's home.
+      if (openingBrief) {
+        onStatus('working');
+        notify(openingBrief);
+      }
 
       // Mic -> Live API. `sendAudio` decides whether each chunk goes out now,
       // is held for a socket that has not opened, or is dropped because a

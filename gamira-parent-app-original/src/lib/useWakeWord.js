@@ -6,10 +6,34 @@ import { getSettings } from '@/lib/userSettings';
 // Speculation is cheap but not free, and the detector guesses far more often
 // than anyone speaks — on the current model it pre-connects on most hard
 // negatives too. These are what keep a noisy room from minting tokens in a loop.
-const MIN_ATTEMPT_GAP_MS = 3000;
-const MAX_ATTEMPTS_PER_MINUTE = 6;
+//
+// They were not enough. Every guess opens a real session: it mints a real
+// ephemeral token from Google, writes a conversation and a session row, and
+// then throws all of it away two seconds later. At the old ceiling that was up
+// to 360 an hour out of an empty room, and the console showed five inside a
+// minute with nobody talking. Halved, and spaced further apart — a guess that
+// arrives five seconds after the last one was never going to be the word
+// anyway.
+const MIN_ATTEMPT_GAP_MS = 5000;
+const MAX_ATTEMPTS_PER_MINUTE = 3;
 /** How long a maybe has to become a yes before it is dropped. */
 const ABANDON_AFTER_MS = 2000;
+
+/**
+ * How sure the detector has to be before it guesses.
+ *
+ * Every other number the detector uses comes out of the training sweep and
+ * ships in `public/wake/manifest.json`, so a retrain re-tunes it. This one is
+ * hand-picked and does not move when the model changes — and it is the one
+ * that decides how often a billed call is made, which makes it worth being
+ * conservative about.
+ *
+ * 0.40 meant "the model was mildly interested for a quarter of a second",
+ * which any speech-like sound in the room satisfies. 0.75 is still well short
+ * of the 0.94 it takes to actually wake, so the pre-connect still hides the
+ * startup cost on a real "Gamira" — it just stops paying for the television.
+ */
+const PRECONNECT = 0.75;
 
 /**
  * Hands-free activation: listen for "Gamira" and open a voice session.
@@ -58,7 +82,21 @@ export function useWakeWord(voice, { lang = 'en-US', telemetry: wantTelemetry = 
   const [telemetry, setTelemetry] = useState(null);
   // Read once. localStorage is not reactive, and a setting that changed
   // mid-session would want a deliberate re-arm anyway.
-  const [enabled] = useState(() => getSettings().wakeWord?.enabled !== false);
+  // Re-read when the Settings screen writes it. It used to be read once, so
+  // turning the wake word off did nothing at all until the app was reloaded —
+  // which is the same as the switch not working.
+  const [enabled, setEnabled] = useState(
+    () => getSettings().wakeWord?.enabled !== false
+  );
+  useEffect(() => {
+    const reread = () => setEnabled(getSettings().wakeWord?.enabled !== false);
+    window.addEventListener('storage', reread);
+    window.addEventListener('gamira:settings', reread);
+    return () => {
+      window.removeEventListener('storage', reread);
+      window.removeEventListener('gamira:settings', reread);
+    };
+  }, []);
 
   const engineRef = useRef(null);
   const recognitionRef = useRef(null);
@@ -270,7 +308,7 @@ export function useWakeWord(voice, { lang = 'en-US', telemetry: wantTelemetry = 
       // Above 1.0 the smoothed score can never reach it, which is how
       // speculation is turned off without a second code path.
       preconnectThreshold:
-        settings.preconnect === false ? 2 : (settings.preconnectThreshold ?? 0.4),
+        settings.preconnect === false ? 2 : (settings.preconnectThreshold ?? PRECONNECT),
       onReady: (info) => {
         setEngine('onnx');
         if (wantTelemetry) setTelemetry((t) => ({ ...t, ...info }));
@@ -308,29 +346,88 @@ export function useWakeWord(voice, { lang = 'en-US', telemetry: wantTelemetry = 
     else arm();
   }, [armed, arm, disarm]);
 
+  // Turned off in Settings while it was running: stop holding the microphone.
+  useEffect(() => {
+    if (!enabled && armed) disarm();
+  }, [enabled, armed, disarm]);
+
   /**
-   * Start listening on the first touch anywhere in the app.
+   * Start listening as soon as we are allowed to, and not one tap later.
    *
-   * Opening the microphone, resuming both AudioContexts and unlocking audio
-   * playback for the chime all require a user gesture, so *some* interaction
-   * has to come first — but it must not be the microphone button. That button
-   * also starts a conversation, and a live conversation pauses the detector, so
-   * tying arming to it meant the wake word only ever began working after
-   * somebody had started and then ended a call by hand. Which is to say: it
-   * never appeared to work at all.
+   * The gesture requirement is real but narrower than it looks. Chrome's
+   * autoplay policy exempts a page that already holds microphone permission —
+   * which is exactly the case being tested here — so on the second and every
+   * subsequent visit both AudioContexts resume without anybody touching
+   * anything, and `getUserMedia` on an already-granted permission does not
+   * prompt.
    *
-   * Any tap will do, and people tap. Capture phase so it fires even where a
-   * handler stops propagation.
+   * That matters because the old "arm on the first tap anywhere" rule looked
+   * correct and was not. This hook only existed on the home screen, so the
+   * first tap it could see was almost always the microphone button — and that
+   * same tap starts a conversation, which *pauses* the detector for the whole
+   * session. The wake word therefore only began working after somebody had
+   * started and then ended a call by hand, which is to say it never appeared
+   * to work at all. The docblock this replaces described that exact failure
+   * and believed it had been fixed.
+   *
+   * So: ask the permission first. If it is already granted, arm on mount and
+   * the app is listening before the person has touched the screen. If it is
+   * merely `prompt`, fall back to the first gesture, because a permission
+   * dialog out of nowhere on a first visit is worse than one tap. If it is
+   * `denied`, stay off and say so rather than asking again on every tap.
    */
   useEffect(() => {
-    if (!enabled || armed || blockedRef.current) return;
-    const options = { once: true, capture: true };
+    if (!enabled) return undefined;
+    let cancelled = false;
+    let permission = null;
+
+    const gestureOptions = { once: true, capture: true };
     const onGesture = () => arm();
-    window.addEventListener('pointerdown', onGesture, options);
-    window.addEventListener('keydown', onGesture, options);
+    const listenForGesture = () => {
+      window.addEventListener('pointerdown', onGesture, gestureOptions);
+      window.addEventListener('keydown', onGesture, gestureOptions);
+    };
+    const stopListeningForGesture = () => {
+      window.removeEventListener('pointerdown', onGesture, gestureOptions);
+      window.removeEventListener('keydown', onGesture, gestureOptions);
+    };
+
+    const onPermissionChange = () => {
+      if (cancelled || permission?.state !== 'granted') return;
+      // Granted in the address bar mid-session. Whatever refused before was
+      // about not having the microphone, so give it another chance rather
+      // than staying latched off until a reload.
+      blockedRef.current = false;
+      arm();
+    };
+
+    (async () => {
+      if (armed || blockedRef.current) return;
+      try {
+        permission = await navigator.permissions?.query({ name: 'microphone' });
+      } catch {
+        // Safari, and anything else without the microphone permission name.
+        permission = null;
+      }
+      if (cancelled) return;
+      if (permission) {
+        permission.addEventListener?.('change', onPermissionChange);
+        if (permission.state === 'denied') {
+          blockedRef.current = true;
+          return;
+        }
+        if (permission.state === 'granted') {
+          arm();
+          return;
+        }
+      }
+      listenForGesture();
+    })();
+
     return () => {
-      window.removeEventListener('pointerdown', onGesture, options);
-      window.removeEventListener('keydown', onGesture, options);
+      cancelled = true;
+      permission?.removeEventListener?.('change', onPermissionChange);
+      stopListeningForGesture();
     };
   }, [enabled, armed, arm]);
 
@@ -366,6 +463,32 @@ export function useWakeWord(voice, { lang = 'en-US', telemetry: wantTelemetry = 
     toggle,
     /** Warm microphone and audio contexts for a session started by hand. */
     resources,
+    /**
+     * Wait briefly for the detector to finish loading, then hand over its
+     * microphone.
+     *
+     * Pressing the button on a cold page used to open a *second*
+     * `getUserMedia` and two more `AudioContext`s alongside the ones the
+     * engine was in the middle of opening, because `resources()` returns
+     * nothing until it is ready. Two microphone streams on one device is the
+     * one arrangement guaranteed to sound wrong.
+     *
+     * Bounded, and short: if the bundle is still downloading after this, the
+     * person pressed a button and is owed an answer more than they are owed
+     * a shared audio graph.
+     */
+    warmResources: useCallback(async (timeoutMs = 800) => {
+      const started = Date.now();
+      // Nothing has begun loading at all — the permission is still `prompt`
+      // and this press is the gesture. Arming now means the engine is warming
+      // while the session connects.
+      if (!engineRef.current && !blockedRef.current) arm();
+      while (Date.now() - started < timeoutMs) {
+        if (engineRef.current?.ready) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      return resources();
+    }, [arm, resources]),
     /**
      * Make one of Gamira's sounds through the engine's live playback context.
      * Used for the end-of-conversation sound, which belongs to the session

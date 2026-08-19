@@ -57,6 +57,13 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (requestPath) => requestPath.replace(/^\/gemini-token/, ''),
       },
+      // The watch relay: a paired watch's only connection is to this app, not
+      // to the Gamira API directly. See watch_relay_server.py.
+      '/watch-relay': {
+        target: process.env.GAMIRA_WATCH_RELAY_TARGET || 'http://127.0.0.1:8021',
+        changeOrigin: true,
+        rewrite: (requestPath) => requestPath.replace(/^\/watch-relay/, ''),
+      },
     },
   },
   plugins: [react()],

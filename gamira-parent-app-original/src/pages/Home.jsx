@@ -1,13 +1,10 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { AlertCircle, Bell, Check, Pill, Settings as SettingsIcon } from 'lucide-react';
-import { useI18n, langCode } from '@/lib/i18n';
-import { useProactive } from '@/lib/useProactive';
-import { useGeminiVoice } from '@/lib/useGeminiVoice';
-import { useWakeWord } from '@/lib/useWakeWord';
-import { mergeSchedule } from '@/lib/schedule';
-import { useSeniorCare } from '@/lib/useSeniorCare';
-import { doses as dosesApi, sos as sosApi } from '@/api/gamiraClient';
+import { useI18n } from '@/lib/i18n';
+import { useVoice } from '@/lib/VoiceContext';
+import { mergeSchedule, minutesUntil, orderTodaySchedule } from '@/lib/schedule';
+import { doses as dosesApi, alerts as alertsApi, sos as sosApi } from '@/api/gamiraClient';
 import {
   METRIC_CARDS,
   OPEN_DOSE_STATUSES,
@@ -15,122 +12,106 @@ import {
   describeMinutes,
   groupReadings,
   readCard,
-  untilLocalTime,
 } from '@/api/parentData';
+import { useSeniorCare } from '@/lib/useSeniorCare';
 import GamiraVoiceButton from '@/components/gamira/GamiraVoiceButton';
 import GamiraStatusPill from '@/components/gamira/GamiraStatusPill';
 import ProactiveNudge from '@/components/gamira/ProactiveNudge';
+import WellbeingCheckCard from '@/components/gamira/WellbeingCheckCard';
+import VoiceTranscript from '@/components/gamira/VoiceTranscript';
 import GamiraCard from '@/components/gamira/GamiraCard';
 import GamiraScheduleCard from '@/components/gamira/GamiraScheduleCard';
 import GamiraSectionHeader from '@/components/gamira/GamiraSectionHeader';
 import GamiraMetricCard from '@/components/gamira/GamiraMetricCard';
 import GamiraSOSButton from '@/components/gamira/GamiraSOSButton';
-import VoiceConfirmDialog from '@/components/gamira/VoiceConfirmDialog';
-import WakeWordDebug from '@/components/gamira/WakeWordDebug';
 import ThemeToggle from '@/components/ThemeToggle';
 
+// Long enough to say "cancel" or reach a large button; short enough that
+// somebody who really needs help is not waiting through it.
+const SOS_COUNTDOWN_SECONDS = 5;
+
 export default function Home() {
-  const { t, lang } = useI18n();
+  const { t } = useI18n();
   const navigate = useNavigate();
 
-  const { self, seniorId, doses, reminders, readings, contacts, loading, error, reload } =
-    useSeniorCare({ doses: true, reminders: true, readings: true, contacts: true });
+  // The voice session, the wake word and anything Gamira decided to say first
+  // all live above this page now, so they survive navigating away from it.
+  const {
+    voice,
+    wake,
+    status: voiceStatus,
+    active: voiceActive,
+    talk,
+    speakFirst,
+    toggle: toggleVoice,
+    register,
+    nudge,
+    dismissNudge,
+    pendingCheck,
+    answerCheck,
+    self,
+    seniorId,
+    doses,
+    reminders,
+    contacts,
+    loading,
+    error,
+    reload,
+  } = useVoice();
+
+  // Only the readings, which are this screen's alone. Everything else comes
+  // from the provider, which already loads it for Gamira — asking twice would
+  // double the requests and let the two copies disagree about the same day.
+  const { readings } = useSeniorCare({ readings: true });
 
   const [busyId, setBusyId] = useState(null);
   const [actionError, setActionError] = useState(null);
-  // Bumped to open the real SOS dialog. The assistant's `prepare_sos` tool ends
-  // up here: it opens the screen, and the person still presses the button.
+  const [checkBusy, setCheckBusy] = useState(false);
+  // Bumped to open the real SOS dialog. The assistant's `prepare_sos` ends up
+  // here: it opens the screen and starts the countdown.
   const [sosSignal, setSosSignal] = useState(0);
-  const contactsRef = useRef(contacts);
-  contactsRef.current = contacts;
+  const sosRef = useRef(null);
 
-  // Client-only voice tools. Each one is a named handler; nothing is built from
-  // what the model said.
-  const openSos = useCallback(() => setSosSignal((n) => n + 1), []);
-  const dialContact = useCallback((contactId) => {
-    const contact = contactsRef.current.find((c) => c.id === contactId);
-    if (!contact) return null;
-    // A tel: link is still the only thing that reliably reaches a person, and
-    // the person presses dial themselves.
-    window.location.href = `tel:${contact.phone}`;
-    return { name: contact.name, phone: contact.phone };
-  }, []);
-
-  // Set once the wake word engine exists; used to make the closing sound come
-  // out of the same speaker the wake sound did.
-  const wakeSoundRef = useRef(null);
-
-  const voice = useGeminiVoice({
-    onOpenSos: openSos,
-    onDialContact: dialContact,
-    // A dose recorded by voice should appear on this screen straight away.
-    onMutation: () => reload({ quiet: true }),
-    // The conversation ended without a button press — either nothing was said
-    // for a while, or they said goodbye. Say so out loud: otherwise the only
-    // evidence is a status line somebody has put the phone down and is not
-    // reading.
-    onAutoStop: () => wakeSoundRef.current?.('stopped'),
-  }, { timezone: self?.timezone || null });
-  const {
-    status: voiceStatus,
-    active: voiceActive,
-    start: startVoice,
-    stop: stopVoice,
-  } = voice;
-
-  // Gamira speaking first when something has been waiting. She says one short
-  // sentence out loud — no microphone, no session, no cost — and leaves a card.
-  const { nudge, dismiss: dismissNudge } = useProactive({
-    doses,
-    reminders,
-    ready: !loading && Boolean(seniorId),
-  });
-
-  // Hands-free activation. The engine holds the microphone and both audio
-  // contexts open, so by the time "Gamira" is confirmed the only thing left to
-  // do is start sending audio — see `useWakeWord` for how the Live API's
-  // startup cost is taken off that path entirely.
-  //
-  // Arming needs a user gesture (microphone permission, and both AudioContexts
-  // have to be resumed), so it happens on the first tap rather than on mount.
-  // Read once: this is a development switch, not a setting.
-  const [wakeDebug] = useState(
-    () => new URLSearchParams(window.location.search).get('wake') === 'debug'
+  // What this screen can do, published for voice tools to reach. Named
+  // handlers, never anything built from what the model said.
+  useEffect(
+    () =>
+      register({
+        openSos: () => setSosSignal((n) => n + 1),
+        cancelSosCountdown: () => sosRef.current?.cancelCountdown() ?? false,
+        // An alert withdrawn out loud. The dialog on this screen is still
+        // saying "your family knows", which stopped being true the moment the
+        // backend cancelled it.
+        sosWithdrawn: () => sosRef.current?.withdrawn() ?? false,
+        openDose: () => navigate('/reminders'),
+        openReminder: () => navigate('/reminders'),
+      }),
+    [register, navigate]
   );
-  const wake = useWakeWord(voice, {
-    lang: langCode[lang] || 'en-US',
-    telemetry: wakeDebug,
-  });
-  const { resources: wakeResources } = wake;
-  wakeSoundRef.current = wake.sound;
-
-  const handleVoiceButton = useCallback(() => {
-    if (voiceActive || voiceStatus === 'connecting') {
-      stopVoice();
-      return;
-    }
-    // Borrow the detector's microphone when it already has one, so pressing the
-    // button does not open a second stream alongside it. (The detector arms
-    // itself on the first touch anywhere — including this one.)
-    startVoice({ resources: wakeResources() });
-  }, [voiceActive, voiceStatus, stopVoice, startVoice, wakeResources]);
 
   const voiceLabels = {
     idle: { label: t('voiceIdle'), sub: t('notListening'), button: t('tapToTalk') },
     connecting: { label: t('voiceConnecting'), sub: t('voiceConnectingSub'), button: t('voiceConnecting') },
     listening: { label: t('voiceActive'), sub: t('listening'), button: t('voiceTapToStop') },
     speaking: { label: t('voiceActive'), sub: t('voiceSpeaking'), button: t('voiceTapToStop') },
-    // Looking something up in the record, or waiting on a confirmation. The
-    // microphone is paused while this is true.
+    // Looking something up in the record, or waiting on a confirmation.
     working: { label: t('voiceActive'), sub: 'Checking your record…', button: t('voiceTapToStop') },
     error: { label: t('voiceUnavailable'), sub: t('notListening'), button: t('tapToTalk') },
   };
   const labels = voiceLabels[voiceStatus] || voiceLabels.idle;
 
   // Whether Gamira is listening for its name is not something to leave people
-  // guessing at — especially when the answer is "no, tap once first".
+  // guessing at — especially when the answer is "no".
   const idleSub =
     voiceStatus === 'idle' && wake.listening ? 'Say “Gamira”, or tap to talk' : labels.sub;
+
+  // What the button looks like, which is the app's only status light.
+  const buttonState =
+    voiceStatus === 'idle' || voiceStatus === 'error'
+      ? wake.listening
+        ? 'wake'
+        : 'off'
+      : voiceStatus;
 
   // Today's schedule: real dose events and the person's active reminders, in
   // the order the day happens rather than in two lists.
@@ -161,13 +142,22 @@ export default function Home() {
     [doses, reminders]
   );
 
+  // Today's schedule, next-thing-first: whatever is still ahead, soonest
+  // first, then whatever has already gone by — with anything past and marked
+  // done dropped, since it happened and does not need to keep the top of the
+  // list. `self.timezone` is the senior's own, not this device's.
+  const orderedSchedule = useMemo(
+    () => orderTodaySchedule(schedule, self?.timezone),
+    [schedule, self?.timezone]
+  );
+
   // The next thing waiting for this person, by clock time.
   const next = useMemo(() => {
     const open = schedule.filter((row) => row.open);
     if (!open.length) return null;
-    const upcoming = open.find((row) => (untilLocalTime(row.localTime) ?? -1) >= 0);
+    const upcoming = open.find((row) => (minutesUntil(row.localTime, self?.timezone) ?? -1) >= 0);
     return upcoming || open[0];
-  }, [schedule]);
+  }, [schedule, self?.timezone]);
 
   const metricCards = useMemo(() => {
     const grouped = groupReadings(readings);
@@ -176,10 +166,10 @@ export default function Home() {
 
   const primaryContact = contacts.find((c) => c.is_primary) || contacts[0] || null;
 
-  const confirm = async (row) => {
-    setBusyId(row.doseId);
+  const confirm = async (doseId) => {
+    setBusyId(doseId);
     try {
-      await dosesApi.markTaken(row.doseId, { source: 'parent_app' });
+      await dosesApi.markTaken(doseId, { source: 'parent_app' });
       await reload();
       setActionError(null);
     } catch (e) {
@@ -188,6 +178,57 @@ export default function Home() {
       setBusyId(null);
     }
   };
+
+  const raiseSos = useCallback(
+    () => (seniorId ? sosApi.raise(seniorId, { source: 'parent_app' }) : null),
+    [seniorId]
+  );
+
+  // Cancelling keeps the row and tells the family it was withdrawn. A red
+  // alert that silently disappears is worse for them than the false alarm was.
+  const cancelSosAlert = useCallback(
+    (alertId) => alertsApi.cancel(alertId, 'They said they are alright.'),
+    []
+  );
+
+  /**
+   * Gamira says the countdown out loud, so it can be stopped by voice.
+   *
+   * Reaching the screen is exactly what pressing SOS says they may not be able
+   * to do, so the way out has to be sayable. Routed through `speakFirst`, which
+   * joins an open conversation if there is one and opens a session if there is
+   * not — this used to be `briefInto(...) || talk(...)`, and `talk` is async,
+   * so the `||` was testing a promise. It was always truthy, the fallback never
+   * ran, and with no session open she simply said nothing.
+   *
+   * These three are memoised because `GamiraSOSButton` counts down on a timer:
+   * a new identity on every render used to restart that timer and re-open the
+   * dialog. The component holds them in refs now as well — belt and braces on
+   * the one control where a bug is an emergency.
+   */
+  const announceCountdown = useCallback(
+    (seconds) =>
+      speakFirst(
+        '[The emergency screen has just opened and is counting down from ' +
+          `${seconds} seconds. Say so in one short sentence, and tell them to ` +
+          'say "cancel" if they are alright. Then stop and listen. If they say ' +
+          'cancel, or that they are alright, use cancel_sos_countdown straight ' +
+          'away.]'
+      ),
+    [speakFirst]
+  );
+
+  const onAnswerCheck = useCallback(
+    async (alright) => {
+      setCheckBusy(true);
+      try {
+        await answerCheck(alright);
+      } finally {
+        setCheckBusy(false);
+      }
+    },
+    [answerCheck]
+  );
 
   const shownError = actionError || error;
 
@@ -224,19 +265,18 @@ export default function Home() {
           />
         </div>
 
-        {/* Voice button */}
+        {/* Voice button and the conversation itself */}
         <div className="flex flex-col items-center gap-3 py-4">
           <GamiraVoiceButton
-            listening={voiceActive || voiceStatus === 'connecting'}
-            onClick={handleVoiceButton}
+            state={buttonState}
+            onClick={toggleVoice}
             label={labels.button}
           />
 
-          {voice.transcript && (
-            <p className="max-w-[19rem] text-center text-[15px] leading-snug text-muted-foreground">
-              {voice.transcript}
-            </p>
-          )}
+          <VoiceTranscript
+            turns={voice.turns}
+            thinking={voiceStatus === 'working' || voiceStatus === 'connecting'}
+          />
 
           {voice.error && (
             <div className="flex w-full items-start gap-2 rounded-2xl border border-destructive/30 bg-destructive/10 p-3">
@@ -262,28 +302,53 @@ export default function Home() {
           </GamiraCard>
         )}
 
-        <ProactiveNudge
-          nudge={nudge}
-          onDismiss={dismissNudge}
-          onTalk={() => {
-            dismissNudge();
-            if (!voiceActive) startVoice();
-          }}
+        {/* A watch flagged something and Gamira has asked about it out loud.
+            This is the way to answer for anybody who would rather not speak. */}
+        <WellbeingCheckCard
+          check={pendingCheck}
+          busy={checkBusy}
+          onAnswer={onAnswerCheck}
         />
 
-        {/* Next thing waiting */}
+        <ProactiveNudge
+          nudge={nudge}
+          busy={busyId === nudge?.doseId}
+          onDismiss={dismissNudge}
+          // A dose is recorded; anything else is just acknowledged. There is
+          // nothing to write down about having had a glass of water, and
+          // completing a daily reminder would end the daily reminder.
+          onDone={
+            nudge?.doseId
+              ? () => confirm(nudge.doseId)
+              : () => dismissNudge()
+          }
+        />
+
+        {/* Next thing waiting — and the one large "Taken" button, in the one
+            place where a large button is genuinely wanted. */}
         {next && (
-          <GamiraCard className="flex items-center gap-3">
-            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-accent/10">
-              <Pill className="h-5 w-5 text-accent" />
+          <GamiraCard className="flex flex-col gap-3">
+            <div className="flex items-center gap-3">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-accent/10">
+                <Pill className="h-5 w-5 text-accent" />
+              </div>
+              <div className="flex-1">
+                <p className="text-[13px] font-medium text-muted-foreground">{t('nextEventLabel')}</p>
+                <p className="text-[15px] font-semibold text-foreground">{next.title}</p>
+              </div>
+              <span className="shrink-0 rounded-full bg-secondary px-3 py-1 text-[12px] font-semibold text-secondary-foreground">
+                {describeMinutes(minutesUntil(next.localTime, self?.timezone))}
+              </span>
             </div>
-            <div className="flex-1">
-              <p className="text-[13px] font-medium text-muted-foreground">{t('nextEventLabel')}</p>
-              <p className="text-[15px] font-semibold text-foreground">{next.title}</p>
-            </div>
-            <span className="shrink-0 rounded-full bg-secondary px-3 py-1 text-[12px] font-semibold text-secondary-foreground">
-              {describeMinutes(untilLocalTime(next.localTime))}
-            </span>
+            {next.doseId && (
+              <button
+                onClick={() => confirm(next.doseId)}
+                disabled={busyId === next.doseId}
+                className="flex h-14 items-center justify-center gap-2 rounded-2xl bg-primary text-lg font-semibold text-primary-foreground transition active:scale-95 disabled:opacity-50"
+              >
+                <Check className="h-6 w-6" /> Taken
+              </button>
+            )}
           </GamiraCard>
         )}
 
@@ -296,32 +361,40 @@ export default function Home() {
                 <div key={i} className="h-16 animate-pulse rounded-2xl border border-border bg-card" />
               ))}
             </div>
-          ) : schedule.length === 0 ? (
+          ) : orderedSchedule.length === 0 ? (
             <GamiraCard>
               <p className="text-[15px] text-muted-foreground">Nothing is scheduled for today.</p>
             </GamiraCard>
           ) : (
             <div className="flex flex-col gap-2.5">
-              {schedule.slice(0, 4).map((row) => (
-                <div key={row.id} className="flex flex-col gap-2">
-                  <GamiraScheduleCard
-                    time={row.time}
-                    title={row.title}
-                    subtitle={row.subtitle}
-                    done={row.done}
-                    icon={row.icon}
-                    onClick={() => navigate('/reminders')}
-                  />
-                  {row.open && (
-                    <button
-                      onClick={() => confirm(row)}
-                      disabled={busyId === row.doseId}
-                      className="flex h-14 items-center justify-center gap-2 rounded-2xl bg-primary text-lg font-semibold text-primary-foreground transition active:scale-95 disabled:opacity-50"
-                    >
-                      <Check className="h-6 w-6" /> Taken
-                    </button>
-                  )}
-                </div>
+              {orderedSchedule.slice(0, 4).map((row) => (
+                <GamiraScheduleCard
+                  key={row.id}
+                  time={row.time}
+                  title={row.title}
+                  subtitle={row.subtitle}
+                  done={row.done}
+                  icon={row.icon}
+                  onClick={() => navigate('/reminders')}
+                  // Inside the card, beside the medicine it records — rather
+                  // than a full-width bar underneath, where the last one read
+                  // as a page action belonging to nothing.
+                  action={
+                    row.open ? (
+                      <button
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          confirm(row.doseId);
+                        }}
+                        disabled={busyId === row.doseId}
+                        aria-label={`Record ${row.title} as taken`}
+                        className="flex h-11 items-center gap-1.5 rounded-xl bg-primary px-3.5 text-[15px] font-semibold text-primary-foreground transition active:scale-95 disabled:opacity-50"
+                      >
+                        <Check className="h-5 w-5" /> Taken
+                      </button>
+                    ) : null
+                  }
+                />
               ))}
             </div>
           )}
@@ -350,6 +423,7 @@ export default function Home() {
                   unit={card.unit}
                   data={card.spark}
                   sparkColor={card.sparkColor}
+                  stale={card.stale}
                 />
               ))}
             </div>
@@ -359,7 +433,9 @@ export default function Home() {
         {/* SOS */}
         <div className="fixed bottom-0 left-1/2 z-10 flex w-full max-w-md -translate-x-1/2 flex-col items-center gap-2 bg-gradient-to-t from-background via-background to-background/0 px-5 pb-5 pt-8">
           <GamiraSOSButton
+            controlRef={sosRef}
             openSignal={sosSignal}
+            countdownSeconds={SOS_COUNTDOWN_SECONDS}
             label={t('sos')}
             confirmTitle="Alert your family?"
             confirmMsg={
@@ -370,9 +446,9 @@ export default function Home() {
             yesLabel="Alert my family"
             cancelLabel={t('cancel')}
             callLabel={primaryContact ? `Call ${primaryContact.name}` : ''}
-            onAlert={
-              seniorId ? () => sosApi.raise(seniorId, { source: 'parent_app' }) : null
-            }
+            onAlert={raiseSos}
+            onCancelAlert={cancelSosAlert}
+            onCountdownStart={announceCountdown}
             onCall={
               primaryContact
                 ? // A tel: link is still the only thing that reliably reaches a
@@ -386,17 +462,6 @@ export default function Home() {
           />
         </div>
       </div>
-
-      {/* Every voice action that changes something passes through here first. */}
-      <VoiceConfirmDialog
-        open={Boolean(voice.confirmation)}
-        prompt={voice.confirmation?.prompt}
-        busy={voice.confirmBusy}
-        onConfirm={voice.acceptConfirmation}
-        onCancel={voice.rejectConfirmation}
-      />
-
-      {wakeDebug && <WakeWordDebug wake={wake} />}
     </>
   );
 }

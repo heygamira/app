@@ -3,14 +3,14 @@ import { AlertCircle, Bell, Check, SkipForward } from 'lucide-react';
 import GamiraSectionHeader from '@/components/gamira/GamiraSectionHeader';
 import GamiraCard from '@/components/gamira/GamiraCard';
 import { useT } from '@/lib/i18n';
-import { sortableTime } from '@/lib/schedule';
+import { minutesUntil, sortableTime } from '@/lib/schedule';
 import { useSeniorCare } from '@/lib/useSeniorCare';
 import { doses as dosesApi } from '@/api/gamiraClient';
 import { OPEN_DOSE_STATUSES, clockTime } from '@/api/parentData';
 
 export default function Reminders() {
   const t = useT();
-  const { doses, reminders, loading, error, seniorId, reload } = useSeniorCare({
+  const { doses, reminders, loading, error, seniorId, self, reload } = useSeniorCare({
     doses: true,
     reminders: true,
   });
@@ -36,12 +36,22 @@ export default function Reminders() {
 
   // Doses and routines stay in separate sections here on purpose: a dose has
   // Taken and Skip against it and a routine does not, and mixing them would put
-  // rows with buttons and rows without into one column. Each section is still
-  // ordered by the clock.
+  // rows with buttons and rows without into one column.
   const byTime = (a, b) => sortableTime(a).localeCompare(sortableTime(b));
+  // Today's open doses, next-thing-first: whatever is still ahead, soonest
+  // first, then whatever has already gone by (late/missed) — the same order
+  // as the Home screen's schedule, so the two screens agree.
   const open = doses
     .filter((dose) => OPEN_DOSE_STATUSES.includes(dose.status))
-    .sort((a, b) => byTime(a.scheduled_local_time, b.scheduled_local_time));
+    .sort((a, b) => {
+      const da = minutesUntil(a.scheduled_local_time, self?.timezone);
+      const db = minutesUntil(b.scheduled_local_time, self?.timezone);
+      const aUpcoming = da === null || da >= 0;
+      const bUpcoming = db === null || db >= 0;
+      if (aUpcoming !== bUpcoming) return aUpcoming ? -1 : 1;
+      if (aUpcoming) return (da ?? Infinity) - (db ?? Infinity);
+      return byTime(a.scheduled_local_time, b.scheduled_local_time);
+    });
   const done = doses.filter((dose) => ['taken', 'skipped'].includes(dose.status));
   const routines = reminders
     .filter((reminder) => reminder.status === 'active')

@@ -186,6 +186,18 @@ const translations = {
     system: 'System',
     light: 'Light',
     dark: 'Dark',
+    // Notifications
+    pushNotifications: 'Push Notifications',
+    pushNotificationsDesc: 'Alerts for reminders and family updates',
+    notificationsTitle: 'Notifications',
+    notificationsSubtitle: 'Get a gentle alert on this device, even when Gamira is closed.',
+    notificationsToggleDesc: 'Turn on to receive reminders and family updates on this device.',
+    notificationsToggleHint: 'To turn this off later, disable notifications for Gamira in your phone or browser settings.',
+    notificationsEnabling: 'Turning on…',
+    notificationsError: 'Something went wrong turning on notifications. Please try again.',
+    notificationsUnsupported: "This browser can't receive notifications on this device. Everything still works while Gamira is open.",
+    notificationsBlockedTitle: 'Notifications are blocked',
+    notificationsBlockedDesc: 'Notifications for Gamira are turned off in your phone or browser settings. To turn them on, open your settings for this browser or app, allow notifications, then come back here.',
     // SOS confirm
     sosConfirmTitle: 'Do you need emergency help?',
     sosConfirmMsg: 'Gamira will call your emergency contact.',

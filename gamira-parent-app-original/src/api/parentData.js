@@ -144,10 +144,35 @@ export function groupReadings(readings = []) {
 }
 
 /**
+ * How old a reading from a device may be and still be shown as a number.
+ *
+ * A watch reports continuously, so its last reading is only "their heart rate"
+ * for as long as it is still reporting. When the watch is off, that number is
+ * simply the last thing it ever said — and showing it in the present tense is
+ * inventing data, which is the one thing this screen must not do. After this
+ * it shows a dash.
+ *
+ * Only readings a *device* sent are treated this way. A weight somebody typed
+ * in last week is not stale; it is their weight.
+ */
+export const LIVE_READING_MINUTES = 10;
+
+function isStale(reading, now) {
+  if (!reading || reading.source !== 'device') return false;
+  const at = new Date(reading.measured_at).getTime();
+  if (Number.isNaN(at)) return false;
+  return now - at > LIVE_READING_MINUTES * 60_000;
+}
+
+/**
  * Turn one card definition into what the screen shows, or null when nothing
  * has been recorded for it.
+ *
+ * `stale` means the number is real but no longer current. The card draws a
+ * dash rather than the value; the value is still here for anything that wants
+ * to say when it was last seen.
  */
-export function readCard(card, grouped) {
+export function readCard(card, grouped, now = Date.now()) {
   const series = card.keys.map((key) => grouped.get(key) || []);
   if (series.every((entries) => entries.length === 0)) return null;
 
@@ -155,6 +180,7 @@ export function readCard(card, grouped) {
     const systolic = series[0][0];
     const diastolic = series[1][0];
     if (!systolic || !diastolic) return null;
+    const stale = isStale(systolic, now) || isStale(diastolic, now);
     return {
       ...card,
       value: `${round(systolic.value)}/${round(diastolic.value)}`,
@@ -162,6 +188,7 @@ export function readCard(card, grouped) {
       // The systolic trend is the one a chart of a single line can honestly show.
       spark: sparkOf(series[0]),
       measuredAt: systolic.measured_at,
+      stale,
     };
   }
 
@@ -172,6 +199,7 @@ export function readCard(card, grouped) {
     unit: card.unit,
     spark: sparkOf(series[0]),
     measuredAt: latest.measured_at,
+    stale: isStale(latest, now),
   };
 }
 

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Play, Check, Volume2 } from 'lucide-react';
+import { Play, Check } from 'lucide-react';
 import SettingsHeader from '@/components/SettingsHeader';
 import { getSettings, updateSettings } from '@/lib/userSettings';
 import { WAKE_SOUNDS, previewSound } from '@/lib/wakeword/sounds';
@@ -33,14 +33,12 @@ const voices = [
 
 const speeds = ['Slow', 'Normal', 'Fast'];
 const speedKey = { Slow: 'slow', Normal: 'standard', Fast: 'fast' };
-const rateMap = { Slow: 0.8, Normal: 1, Fast: 1.3 };
 
 export default function Voice() {
   const t = useT();
   const s = getSettings();
   const [selected, setSelected] = useState(s.voice || 'Warm Female');
   const [speed, setSpeed] = useState(s.speakingSpeed || 'Normal');
-  const [playing, setPlaying] = useState(null);
   const [saved, setSaved] = useState(false);
   const [wake, setWake] = useState(() => ({
     enabled: true,
@@ -56,25 +54,6 @@ export default function Voice() {
   const [proactive, setProactive] = useState(
     () => s.proactive?.enabled !== false,
   );
-
-  const preview = (name) => {
-    setPlaying(name);
-    try {
-      const utter = new SpeechSynthesisUtterance(t('voicePreview'));
-      utter.rate = rateMap[speed] || 1;
-      const female = /Female/i.test(name);
-      const list = window.speechSynthesis.getVoices();
-      const match = list.find((v) => /female/i.test(v.name) === female);
-      if (match) utter.voice = match;
-      utter.onend = () => setPlaying(null);
-      utter.onerror = () => setPlaying(null);
-      window.speechSynthesis.cancel();
-      window.speechSynthesis.speak(utter);
-    } catch {
-      setPlaying(null);
-    }
-    setTimeout(() => setPlaying((p) => (p === name ? null : p)), 4000);
-  };
 
   const save = () => {
     // The whole wake-word object every time: settings are merged one level
@@ -105,6 +84,11 @@ export default function Voice() {
           </div>
         )}
 
+        {/* There is no preview button here any more. It played one of the
+            browser's own synthesised voices, which is not the voice Gamira
+            speaks with — hers comes from the Live API and is chosen by the
+            backend — so it was a sample of something the person would never
+            hear. The honest preview is talking to her. */}
         <div className="flex flex-col gap-3">
           {voices.map((v) => {
             const active = selected === v.name;
@@ -118,14 +102,6 @@ export default function Voice() {
                   <span className={`flex h-8 w-8 items-center justify-center rounded-full border-2 ${active ? 'border-primary bg-primary text-white' : 'border-border'}`}>
                     {active && <Check className="h-5 w-5" strokeWidth={3} />}
                   </span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => preview(v.name)}
-                  className="mt-3 flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-primary/10 text-base font-semibold text-primary transition active:scale-95"
-                >
-                  {playing === v.name ? <Volume2 className="h-5 w-5" /> : <Play className="h-5 w-5" />}
-                  {playing === v.name ? t('playing') : t('play')}
                 </button>
               </div>
             );

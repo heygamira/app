@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom';
-import { User, Globe, Volume2, ShieldAlert, Accessibility, Headphones, Info, Contrast, ArrowLeft, Brain, Users } from 'lucide-react';
+import { User, Globe, Volume2, ShieldAlert, Accessibility, Headphones, Info, Contrast, ArrowLeft, Brain, Users, Bell } from 'lucide-react';
 import SettingRow from '@/components/SettingRow';
 import { getSettings } from '@/lib/userSettings';
 import { getStoredTheme } from '@/lib/theme';
@@ -108,6 +108,14 @@ export default function Settings() {
           description={t('themeDesc')}
           value={themeLabel}
           onClick={() => navigate('/settings/theme')}
+        />
+        <SettingRow
+          icon={Bell}
+          iconBg="bg-primary/10"
+          iconColor="text-primary"
+          title={t('pushNotifications')}
+          description={t('pushNotificationsDesc')}
+          onClick={() => navigate('/settings/notifications')}
         />
         <SettingRow
           icon={Headphones}

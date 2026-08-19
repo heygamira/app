@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { ai as aiApi } from '@/api/gamiraClient';
 import { startVoiceSession } from '@/lib/geminiVoice';
 import { getSettings } from '@/lib/userSettings';
-import { createUiDispatcher } from '@/lib/voiceTools';
+import { createUiDispatcher, isBackendMutation } from '@/lib/voiceTools';
 
 /**
  * React wrapper around the Gemini Live voice session.
@@ -16,10 +16,14 @@ import { createUiDispatcher } from '@/lib/voiceTools';
  *
  * @param {object} [handlers] optional client-tool hooks the page provides
  * @param {() => void} [handlers.onOpenSos]     open the real SOS confirmation
+ * @param {() => boolean} [handlers.onCancelSosCountdown]  stop a running SOS
+ *   countdown; returns whether one was actually running
  * @param {(contactId: string) => {name?: string, phone?: string} | null} [handlers.onDialContact]
  * @param {(doseEventId: string) => void} [handlers.onOpenDose]
  * @param {(reminderId: string) => void} [handlers.onOpenReminder]
  * @param {(outcome?: object) => void} [handlers.onMutation]  something was recorded; reload
+ * @param {(result: {name: string, response: object}) => void} [handlers.onToolResult]
+ *   a backend tool finished, named, so a screen can react to what was done
  * @param {(reason: 'idle' | 'goodbye') => void} [handlers.onAutoStop]  the session closed itself
  * @param {object} [options]
  * @param {string} [options.timezone] the cared-for person's timezone, for the
@@ -31,6 +35,11 @@ export function useGeminiVoice(handlers = {}, { timezone = null } = {}) {
   const [status, setStatus] = useState('idle');
   const [error, setError] = useState(null);
   const [transcript, setTranscript] = useState('');
+  // Both sides of what is being said, newest last. The person's own words were
+  // transcribed all along and handed to nobody, so the screen showed half a
+  // conversation — which to somebody unsure whether they were heard reads
+  // exactly like not being heard.
+  const [turns, setTurns] = useState([]);
   // The one action waiting on this person: { decisionId, prompt, toolName }.
   const [confirmation, setConfirmation] = useState(null);
   const [confirmBusy, setConfirmBusy] = useState(false);
@@ -51,10 +60,74 @@ export function useGeminiVoice(handlers = {}, { timezone = null } = {}) {
   // Transcript chunks stream in mid-sentence, so they are appended — but each
   // turn has to start a fresh line or replies run together into one blob.
   const freshTurnRef = useRef(true);
+  // True only while she is actually speaking. The microphone stays hot the
+  // whole time she talks, so it can be barge-in the instant she needs to be
+  // interrupted — but that means it also picks up an echo of her own voice,
+  // or a stray "mm-hmm", none of which is a real interruption. A genuine
+  // barge-in ends her turn and moves status off 'speaking' before its
+  // transcript arrives; a live interim transcript that arrives while this is
+  // still true is exactly that background noise, not something they said.
+  const speakingRef = useRef(false);
   // Handlers change on every render of the page that owns them; the session is
   // built once, so it reads them through a ref.
   const handlersRef = useRef(handlers);
   handlersRef.current = handlers;
+
+  // How long this session may sit silent before closing itself. Null means the
+  // person's own setting, which is what a session they started gets.
+  const listenSecondsRef = useRef(null);
+
+  // The person's utterance is finished, so the next thing they say is a new
+  // line rather than more of this one. See `appendTurn`.
+  const themTurnDoneRef = useRef(false);
+  // A goodbye is being finished. The "stopped" chime waits for the socket to
+  // close rather than playing over the sentence it is about.
+  const goodbyeRef = useRef(false);
+
+  /**
+   * Add a chunk to the running transcript.
+   *
+   * Chunks arrive mid-word, so consecutive ones from the same speaker are
+   * joined rather than listed. Capped, because this is what is being said now,
+   * not a record of the conversation: that lives in the backend, and putting an
+   * unbounded list on an older person's phone would eventually cost them the
+   * screen.
+   *
+   * `replace` is what the person's own transcript needs, and it needs it for
+   * **both** of the messages that carry it. The interim transcription is a
+   * running best guess at the whole utterance, re-sent as it improves; the
+   * finalised one that follows is that same utterance, corrected. Appending
+   * either of them repeats the words — the interim once per revision, and the
+   * final one whole sentence at a time, which is why their line read like
+   * "I have a headacheI have a headache".
+   *
+   * `endsTurn` is how the two are told apart without a timer: the finalised
+   * transcript closes the utterance, so the next interim starts a fresh line
+   * instead of overwriting what they just said.
+   */
+  const appendTurn = useCallback((role, text, { replace = false, endsTurn = false } = {}) => {
+    if (!text) return;
+    const startFresh = role === 'them' && themTurnDoneRef.current;
+    if (role === 'them') themTurnDoneRef.current = endsTurn;
+    setTurns((prev) => {
+      const last = prev[prev.length - 1];
+      if (last && last.role === role && !startFresh) {
+        const merged = {
+          ...last,
+          // Generous, and the caption line depends on it being generous: that
+          // component tracks how much of a turn it has already shown as an
+          // offset into this string, and dropping characters off the front
+          // moves every offset. 4000 characters is several minutes of speech
+          // against a turn she is told to keep to a sentence or two, so the
+          // cap is a backstop against a stuck stream rather than something
+          // that happens in a conversation.
+          text: (replace ? text : last.text + text).slice(-4000),
+        };
+        return [...prev.slice(0, -1), merged];
+      }
+      return [...prev, { role, text: text.trimStart(), at: Date.now() }].slice(-12);
+    });
+  }, []);
 
   const stop = useCallback(() => {
     // The handle frees the backend's slot itself, on every path out — including
@@ -62,6 +135,7 @@ export function useGeminiVoice(handlers = {}, { timezone = null } = {}) {
     sessionRef.current?.stop();
     sessionRef.current = null;
     provisionalRef.current = false;
+    listenSecondsRef.current = null;
     setStatus('idle');
     setError(null);
     setConfirmation(null);
@@ -88,12 +162,21 @@ export function useGeminiVoice(handlers = {}, { timezone = null } = {}) {
         openDose: (id) => handlersRef.current.onOpenDose?.(id),
         openReminder: (id) => handlersRef.current.onOpenReminder?.(id),
         openSos: () => handlersRef.current.onOpenSos?.(),
+        cancelSosCountdown: () => handlersRef.current.onCancelSosCountdown?.(),
         openDialer: (contactId) => handlersRef.current.onDialContact?.(contactId),
-        // "Bye" ends the conversation. Routed through the same stop() a button
-        // press uses, so the session is released exactly the same way.
+        // "Bye" ends the conversation — but only once she has finished saying
+        // goodbye. She calls this tool in the same turn as "talk to you
+        // later", and the audio for that sentence is already scheduled, so
+        // stopping here cut her off mid-word. `finish()` stops listening
+        // immediately and closes when the sentence has actually been said.
         endConversation: () => {
-          stop();
-          handlersRef.current.onAutoStop?.('goodbye');
+          const session = sessionRef.current;
+          if (!session) return;
+          // The handle is deliberately kept until the socket actually closes.
+          // It is what stops a wake word opening a second session over the top
+          // of the goodbye, and what a stop button would still act on.
+          goodbyeRef.current = true;
+          session.finish();
         },
       }),
     [navigate, timezone, stop]
@@ -111,15 +194,26 @@ export function useGeminiVoice(handlers = {}, { timezone = null } = {}) {
    */
   const start = useCallback((options = {}) => {
     if (sessionRef.current) return;
-    const { provisional = false, resources = {} } = options;
+    const {
+      provisional = false,
+      resources = {},
+      openingBrief = null,
+      listenSeconds = null,
+    } = options;
 
     provisionalRef.current = provisional;
+    // A session Gamira opened herself closes sooner than one somebody started
+    // by pressing a button. Nobody asked for it, so an unanswered one should
+    // not sit there holding a microphone for the ordinary minute.
+    listenSecondsRef.current = listenSeconds;
     touch();
     if (!provisional) {
       setError(null);
       setTranscript('');
+      setTurns([]);
       setConfirmation(null);
       freshTurnRef.current = true;
+      themTurnDoneRef.current = false;
     }
 
     sessionRef.current = startVoiceSession({
@@ -132,7 +226,10 @@ export function useGeminiVoice(handlers = {}, { timezone = null } = {}) {
       sendToolCalls: (sessionId, calls) => aiApi.sendToolCalls(sessionId, calls),
       dispatchClientTool,
       provisional,
-      autoStream: !provisional,
+      openingBrief,
+      // A speculative session sends nothing until the wake word is confirmed;
+      // a proactive one sends nothing until Gamira has finished her sentence.
+      autoStream: !provisional && !openingBrief,
       stream: resources.stream || null,
       captureCtx: resources.captureCtx || null,
       playbackCtx: resources.playbackCtx || null,
@@ -151,10 +248,14 @@ export function useGeminiVoice(handlers = {}, { timezone = null } = {}) {
         }
       },
       onStatus: (next) => {
+        speakingRef.current = next === 'speaking';
         if (next === 'closed') {
           const wasProvisional = provisionalRef.current;
+          const wasGoodbye = goodbyeRef.current;
+          goodbyeRef.current = false;
           sessionRef.current = null;
           provisionalRef.current = false;
+          if (wasGoodbye) handlersRef.current.onAutoStop?.('goodbye');
           if (wasProvisional) return; // a guess ending is not an event
           setConfirmation(null);
           // A failure reports onError first and then closes; don't let the
@@ -171,14 +272,35 @@ export function useGeminiVoice(handlers = {}, { timezone = null } = {}) {
         touch();
         setStatus(next);
       },
+      onToolResult: (result) => {
+        touch();
+        handlersRef.current.onToolResult?.(result);
+        if (result?.response?.status === 'ok' && isBackendMutation(result.name)) {
+          handlersRef.current.onMutation?.({ tool_response: result.response });
+        }
+      },
       onTranscript: (text) => {
         touch();
+        appendTurn('gamira', text);
         if (freshTurnRef.current) {
           freshTurnRef.current = false;
           setTranscript(text.trimStart());
           return;
         }
         setTranscript((prev) => (prev + text).slice(-400));
+      },
+      onUserTranscript: (text, meta) => {
+        // A live interim transcript while she is still speaking is the open
+        // mic hearing itself, not them talking — showing it would hijack her
+        // caption over nothing (see `speakingRef` above). A genuine barge-in
+        // has already moved status off 'speaking' by the time its transcript
+        // lands, so this only ever drops noise, never a real interruption.
+        // The finalised transcript is always real, whenever it lands, so it
+        // is never dropped.
+        if (meta?.live && speakingRef.current) return;
+        touch();
+        // Both forms replace; only the finalised one closes the utterance.
+        appendTurn('them', text, { replace: true, endsTurn: !meta?.live });
       },
       onTurnEnd: () => {
         touch();
@@ -200,7 +322,7 @@ export function useGeminiVoice(handlers = {}, { timezone = null } = {}) {
         setStatus('error');
       },
     });
-  }, [dispatchClientTool]);
+  }, [dispatchClientTool, appendTurn]);
 
   /**
    * The wake word was confirmed: turn the speculative session into a real one.
@@ -221,8 +343,10 @@ export function useGeminiVoice(handlers = {}, { timezone = null } = {}) {
     touch();
     setError(null);
     setTranscript('');
+    setTurns([]);
     setConfirmation(null);
     freshTurnRef.current = true;
+    themTurnDoneRef.current = false;
     setStatus('connecting');
 
     if (prependAudio?.length) session.prependAudio(prependAudio);
@@ -325,7 +449,8 @@ export function useGeminiVoice(handlers = {}, { timezone = null } = {}) {
   const active = status === 'listening' || status === 'speaking' || status === 'working';
 
   useEffect(() => {
-    const seconds = getSettings().voiceSession?.autoStopSeconds ?? 60;
+    const seconds =
+      listenSecondsRef.current ?? (getSettings().voiceSession?.autoStopSeconds ?? 60);
     // 0 means never, for anyone who would rather it stayed open.
     if (!seconds || !active) return undefined;
 
@@ -342,10 +467,28 @@ export function useGeminiVoice(handlers = {}, { timezone = null } = {}) {
   // Never leave the microphone open behind a navigation.
   useEffect(() => () => sessionRef.current?.stop(), []);
 
+  /**
+   * Say something into a conversation that is already happening.
+   *
+   * Returns false when there is nothing open, which is how the caller knows to
+   * start a session instead. Two sessions at once would fight over one
+   * microphone; talking over somebody mid-sentence to mention a late tablet
+   * would be worse than the late tablet.
+   */
+  const briefInto = useCallback((text) => {
+    const session = sessionRef.current;
+    if (!session || provisionalRef.current || !text) return false;
+    session.brief(text);
+    touch();
+    return true;
+  }, []);
+
   return {
     status,
     error,
     transcript,
+    turns,
+    briefInto,
     confirmation,
     confirmBusy,
     acceptConfirmation,

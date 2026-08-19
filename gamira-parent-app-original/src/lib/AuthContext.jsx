@@ -1,5 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { onIdTokenChanged } from 'firebase/auth';
 import { gamira } from '@/api/gamiraClient';
+import { auth as firebaseAuth, firebaseEnabled } from '@/lib/firebase';
 
 const AuthContext = createContext(null);
 
@@ -75,9 +77,38 @@ export const AuthProvider = ({ children }) => {
     }
   }, [applySession]);
 
+  // Re-fetches `/me` without touching `isLoadingAuth`. `checkUserAuth`
+  // toggling that flag is right for the initial "are we signed in" check —
+  // but a screen gated on `isLoadingAuth` (ProtectedRoute renders its
+  // fallback, not the route, while it is true) unmounts every time it calls
+  // `checkUserAuth` to pick up a session change it just caused. If that
+  // screen's own mount effect is what triggers the refresh, the remount
+  // fires the effect again, which calls it again — an infinite mount/unmount
+  // loop. `AcceptInvite` is exactly that screen.
+  const refreshSession = useCallback(async () => {
+    if (!gamira.auth.isAuthenticated()) return;
+    applySession(await gamira.auth.me());
+  }, [applySession]);
+
   useEffect(() => {
     checkUserAuth();
   }, [checkUserAuth]);
+
+  // A Firebase ID token expires hourly; the SDK refreshes it in the
+  // background and reports the new one here. Re-arm the stored bearer token
+  // so a long-open tab doesn't start failing requests once the old one
+  // expires. Left alone entirely while a `dev:` session is active, so this
+  // can never clobber a dev-identity sign-in with a stale Firebase session
+  // left over in the browser from a previous visit.
+  useEffect(() => {
+    if (!firebaseEnabled || !firebaseAuth) return undefined;
+    return onIdTokenChanged(firebaseAuth, async (firebaseUser) => {
+      if (!firebaseUser) return;
+      const current = gamira.auth.getToken();
+      if (current && current.startsWith('dev:')) return;
+      gamira.auth.setToken(await firebaseUser.getIdToken());
+    });
+  }, []);
 
   const signIn = useCallback(
     async (token) => {
@@ -110,12 +141,16 @@ export const AuthProvider = ({ children }) => {
     [applySession]
   );
 
-  // The Parent App is the senior's own device. Their profile is the one linked
-  // to the signed-in user; if the family has not linked one yet, fall back to
-  // the first visible person so the screens still have something to show.
+  // The Parent App is the senior's own device: it must show the profile
+  // actually linked to the signed-in user, never merely the first one a
+  // family happens to have. Falling back to `seniors[0]` here used to mean a
+  // second cared-for person's Parent App silently showed the first person's
+  // record until someone linked their account — wrong, and unnoticed because
+  // it never errored. `RequireLinkedSenior` gates every screen that reads
+  // this on it being non-null.
   const self = useMemo(() => {
     if (!user) return null;
-    return seniors.find((senior) => senior.user_id === user.id) || seniors[0] || null;
+    return seniors.find((senior) => senior.user_id === user.id) || null;
   }, [seniors, user]);
 
   const value = useMemo(
@@ -132,6 +167,7 @@ export const AuthProvider = ({ children }) => {
       logout,
       navigateToLogin,
       checkUserAuth,
+      refreshSession,
       updateProfile,
     }),
     [
@@ -147,6 +183,7 @@ export const AuthProvider = ({ children }) => {
       logout,
       navigateToLogin,
       checkUserAuth,
+      refreshSession,
       updateProfile,
     ]
   );

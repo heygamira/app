@@ -72,3 +72,61 @@ export function mergeSchedule(doses, reminders, options) {
   ];
   return rows.sort(compareScheduleRows);
 }
+
+/**
+ * Minutes from now until a local `HH:MM`; negative once it has passed, `null`
+ * when there is nothing to compare (no time at all).
+ *
+ * `timezone` is the senior's own, which is the authority — comparing against
+ * the browser's clock means a device set to the wrong place, or one that has
+ * travelled, silently shifts every "next up" and every ago/until label.
+ */
+export function minutesUntil(localTime, timezone, now = new Date()) {
+  if (!localTime) return null;
+  const [hours, minutes] = String(localTime).split(':').map(Number);
+  if (Number.isNaN(hours) || Number.isNaN(minutes)) return null;
+
+  let hour = now.getHours();
+  let minute = now.getMinutes();
+  if (timezone) {
+    try {
+      const parts = new Intl.DateTimeFormat('en-GB', {
+        timeZone: timezone,
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      }).formatToParts(now);
+      const value = (type) => Number(parts.find((part) => part.type === type)?.value ?? 0);
+      hour = value('hour') % 24;
+      minute = value('minute');
+    } catch {
+      // An unknown timezone is not a reason to stop showing a schedule.
+    }
+  }
+  return hours * 60 + minutes - (hour * 60 + minute);
+}
+
+/**
+ * Today's rows, in the order the day is actually still happening: whatever is
+ * next first, soonest to furthest out — then, only after everything still
+ * ahead, whatever has already gone by. A row that is both past and marked
+ * done is dropped rather than ordered at all: it happened, and does not need
+ * to keep sitting at the top of somebody's day once it has.
+ *
+ * A dose gone quietly past with nothing recorded (missed, not taken) is kept
+ * — it is still the one thing most worth noticing — so only `done` rows are
+ * ever removed, never merely-late ones.
+ */
+export function orderTodaySchedule(rows, timezone, now = new Date()) {
+  const dated = rows
+    .map((row) => ({ row, delta: minutesUntil(row.localTime, timezone, now) }))
+    .filter(({ row, delta }) => !(row.done && delta !== null && delta < 0));
+
+  const upcoming = dated.filter(({ delta }) => delta === null || delta >= 0);
+  const past = dated.filter(({ delta }) => delta !== null && delta < 0);
+
+  upcoming.sort((a, b) => (a.delta ?? Infinity) - (b.delta ?? Infinity) || compareScheduleRows(a.row, b.row));
+  past.sort((a, b) => compareScheduleRows(a.row, b.row));
+
+  return [...upcoming, ...past].map(({ row }) => row);
+}

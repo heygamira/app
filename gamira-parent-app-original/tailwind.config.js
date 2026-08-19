@@ -42,11 +42,11 @@ module.exports = {
   			},
   			success: {
   				DEFAULT: 'hsl(var(--success))',
-  				foreground: '0 0% 100%'
+  				foreground: 'hsl(0 0% 100%)'
   			},
   			warning: {
   				DEFAULT: 'hsl(var(--warning))',
-  				foreground: '0 0% 100%'
+  				foreground: 'hsl(0 0% 100%)'
   			},
   			elevated: {
   				DEFAULT: 'hsl(var(--elevated-card))'

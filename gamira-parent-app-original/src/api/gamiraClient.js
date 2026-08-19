@@ -238,6 +238,30 @@ export const healthReadings = {
   },
   create: (seniorId, body) =>
     request(`/seniors/${seniorId}/health-readings`, { method: 'POST', body }),
+  /**
+   * Several readings in one request — a flushed batch from a paired watch,
+   * not one round trip per metric per tick.
+   *
+   * @param {string} seniorId
+   * @param {object[]} readings
+   */
+  createBulk: (seniorId, readings) =>
+    request(`/seniors/${seniorId}/health-readings/bulk`, {
+      method: 'POST',
+      body: { readings },
+    }),
+};
+
+export const deviceFlags = {
+  /**
+   * A paired device (today: the watch relay) reporting that a reading left a
+   * band it configured — not an SOS, and not Gamira's own judgement.
+   *
+   * @param {string} seniorId
+   * @param {object} body
+   */
+  raise: (seniorId, body) =>
+    request(`/seniors/${seniorId}/device-flags`, { method: 'POST', body }),
 };
 
 export const notifications = {
@@ -296,6 +320,37 @@ export const alerts = {
     request(`/alerts/${alertId}/acknowledge`, { method: 'POST', body: { note } }),
   resolve: (alertId, resolution) =>
     request(`/alerts/${alertId}/resolve`, { method: 'POST', body: { resolution } }),
+  /**
+   * Withdraw an alert that should not have been raised.
+   *
+   * A reason is required by the backend and is not optional here either: an
+   * alert that vanishes with no explanation is worse for the family than the
+   * false alarm was. The cared-for person may cancel their own; anybody else
+   * needs write access.
+   */
+  cancel: (alertId, reason) =>
+    request(`/alerts/${alertId}/cancel`, { method: 'POST', body: { reason } }),
+};
+
+/**
+ * Questions Gamira owes this person because a device flagged one of their
+ * readings.
+ *
+ * The watch draws its own lines and says so; nothing here is a clinical
+ * judgement by Gamira or by the backend, and the wording on screen has to keep
+ * saying whose judgement it is.
+ */
+export const wellbeingChecks = {
+  list: (seniorId, { pendingOnly = true } = {}) =>
+    request(
+      `/seniors/${seniorId}/wellbeing-checks?pending_only=${pendingOnly ? 'true' : 'false'}`
+    ),
+  /** Answer by tapping, for anybody who cannot or would rather not speak. */
+  answer: (checkId, alright) =>
+    request(`/wellbeing-checks/${checkId}/answer`, {
+      method: 'POST',
+      body: { alright },
+    }),
 };
 
 export const devices = {
@@ -446,9 +501,11 @@ export const gamira = {
   reminders,
   timeline,
   healthReadings,
+  deviceFlags,
   notifications,
   sos,
   alerts,
+  wellbeingChecks,
   emergencyContacts,
   appointments,
   devices,

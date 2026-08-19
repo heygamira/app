@@ -79,9 +79,14 @@ the server will reject.
   then offers to dial a saved contact from this phone. That is all it can do:
   no SMS, no push, no call placed for the person, no escalation when nobody
   answers. Say exactly that on screen.
-- The Parent App does not register for push: there is no service worker, so
-  there is no token. Every notification still reaches somebody only when their
-  app is open, and the screens say so.
+- The Parent App can register for push: `usePushRegistration`
+  (`src/lib/usePushRegistration.js`) asks permission, gets an FCM token via
+  `public/firebase-messaging-sw.js`, and calls `POST /devices`. It only runs
+  when the person turns it on from Settings → Notifications — nothing here
+  asks on its own. Even then, an actual push additionally needs the backend's
+  `FCM_PROVIDER=firebase` credentials configured, which is a separate,
+  not-yet-done step; until that happens, or for anyone who leaves the toggle
+  off, a notification still only reaches somebody whose app is open.
 - There is no login-bypass switch in the source any more. Use
   `VITE_BYPASS_AUTH` in `.env.local`, or `?dev=<subject>` in the URL to make
   one window a particular seeded person, for local UI work. Both only work

@@ -1,7 +1,17 @@
 import { cn } from '@/lib/utils';
 import { Clock, Check } from 'lucide-react';
 
-export default function GamiraScheduleCard({ time, title, subtitle = null, done = false, icon: Icon, onClick = undefined }) {
+/**
+ * One thing on today's schedule.
+ *
+ * `action` is rendered inside the card, on the right. The taken button used to
+ * be a full-width bar rendered *after* each open row, so the last one floated
+ * between the schedule and the health section looking like a page-level
+ * action — a big blue button apparently belonging to nothing, which for a dose
+ * confirmation is the wrong thing to be ambiguous about. Keeping it in the
+ * card keeps it attached to the medicine it records.
+ */
+export default function GamiraScheduleCard({ time, title, subtitle = null, done = false, icon: Icon, onClick = undefined, action = null }) {
   return (
     <div
       onClick={onClick}
@@ -27,10 +37,11 @@ export default function GamiraScheduleCard({ time, title, subtitle = null, done 
           <Clock className="h-5 w-5 text-primary" />
         )}
       </div>
-      <div className="flex-1">
+      <div className="min-w-0 flex-1">
         <p className="text-[15px] font-semibold leading-tight text-foreground">{title}</p>
         <p className="text-[12px] text-muted-foreground">{subtitle}</p>
       </div>
+      {action ? <div className="shrink-0">{action}</div> : null}
     </div>
   );
 }

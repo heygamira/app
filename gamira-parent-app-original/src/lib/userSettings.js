@@ -49,6 +49,15 @@ export function saveSettings(data) {
   } catch {
     /* ignore */
   }
+  // localStorage is not reactive, and `storage` only fires in *other* tabs —
+  // so anything reading a setting in this one had no way to know it changed.
+  // The wake-word switch in particular did nothing until a reload, which to
+  // the person holding the phone is a switch that does not work.
+  try {
+    window.dispatchEvent(new Event('gamira:settings'));
+  } catch {
+    /* not a browser */
+  }
 }
 
 export function updateSettings(patch) {
