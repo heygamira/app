@@ -28,7 +28,7 @@ from app.models.care import NotificationDelivery, Reminder
 from app.models.enums import NotificationType, ReminderStatus, ReminderType
 from app.models.jobs import BackgroundJob
 from tests.conftest import auth
-from tests.factories import create_family, join, start_live_session
+from tests.factories import create_family, join, midday_timezone, start_live_session
 
 # The fake provider proposes a reminder when the plants come up, and asks for
 # the family only when Gamira said she would mention it. Both triggers are in
@@ -243,6 +243,23 @@ def test_quiet_hours_can_be_switched_off():
     assert review_service.held_until("Asia/Kolkata", settings, _at(3)) is None
 
 
+def _quiet_right_now(worker_settings: Settings) -> None:
+    """Force quiet hours to cover this exact moment, whatever it is.
+
+    A previous version of this helper set start=0, end=23 to mean "their
+    whole day," but held_until's window is half-open (start <= hour < end),
+    so hour 23 itself was always excluded — and start == end is special-cased
+    to mean quiet hours are *off* (`held_until`), so no fixed pair of hours
+    can cover all 24 without a gap. This failed for real whenever a test
+    happened to run at 23:00 in the family's timezone. Building the window
+    around the current hour instead of trying to be exhaustive is exact by
+    construction rather than exact for all but one hour a day.
+    """
+    now_hour = dt.datetime.now(ZoneInfo("Asia/Kolkata")).hour
+    worker_settings.family_notice_quiet_start_hour = now_hour
+    worker_settings.family_notice_quiet_end_hour = (now_hour + 1) % 24
+
+
 async def test_a_notice_raised_at_night_is_held_rather_than_dropped(
     client, session, run_worker, worker_settings
 ):
@@ -250,10 +267,7 @@ async def test_a_notice_raised_at_night_is_held_rather_than_dropped(
     family = await create_family(client, owner="owner-a")
     await join(client, family, subject="owner-b", role="family")
     live = await _conversation(client, "owner-a", LONELY_AND_TOLD)
-    # Their whole day is quiet hours, which is the same test as 3am without
-    # depending on what time it happens to be when this runs.
-    worker_settings.family_notice_quiet_start_hour = 0
-    worker_settings.family_notice_quiet_end_hour = 23
+    _quiet_right_now(worker_settings)
 
     await _review(run_worker, live)
 
@@ -281,8 +295,7 @@ async def test_the_held_notice_sends_the_same_message_later(
     family = await create_family(client, owner="owner-a")
     await join(client, family, subject="owner-b", role="family")
     live = await _conversation(client, "owner-a", LONELY_AND_TOLD)
-    worker_settings.family_notice_quiet_start_hour = 0
-    worker_settings.family_notice_quiet_end_hour = 23
+    _quiet_right_now(worker_settings)
     await _review(run_worker, live)
     held = (
         await session.execute(
@@ -316,7 +329,9 @@ async def test_the_person_can_read_what_was_sent_to_their_family(
     client, session, run_worker
 ):
     """"Openly" has to survive the conversation ending."""
-    family = await create_family(client, owner="owner-a")
+    # Quiet hours (21:00-08:00) would defer this notice on a default-timezone
+    # family; the test expects immediate delivery.
+    family = await create_family(client, owner="owner-a", timezone=midday_timezone())
     await join(client, family, subject="owner-b", role="family")
     await join(client, family, subject="the-senior", role="viewer")
     live = await _conversation(client, "owner-a", LONELY_AND_TOLD)

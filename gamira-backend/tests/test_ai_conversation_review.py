@@ -33,7 +33,7 @@ from app.models.enums import (
 )
 from app.models.jobs import BackgroundJob
 from tests.conftest import auth
-from tests.factories import create_family, join, start_live_session
+from tests.factories import create_family, join, midday_timezone, start_live_session
 
 # A conversation in which somebody says they are lonely *and* Gamira says she
 # will mention it. The fake provider keys off both, exactly as the real rule
@@ -213,7 +213,11 @@ async def test_what_it_notices_becomes_a_memory(client, session, run_worker):
 async def test_the_family_is_told_only_after_the_person_was(
     client, session, run_worker
 ):
-    family = await create_family(client, owner="owner-a")
+    # A default-timezone family lands in quiet hours (21:00-08:00) for part of
+    # the day, which would defer this notice instead of sending it — the test
+    # expects immediate delivery, so it needs a senior for whom "now" is
+    # unambiguously daytime.
+    family = await create_family(client, owner="owner-a", timezone=midday_timezone())
     await join(client, family, subject="owner-b", role="family")
     live = await _conversation(client, "owner-a", LONELY_AND_TOLD)
 
@@ -262,7 +266,9 @@ async def test_a_review_never_raises_an_alert(client, session, run_worker):
 
 
 async def test_reviewing_twice_tells_the_family_once(client, session, run_worker):
-    family = await create_family(client, owner="owner-a")
+    # See the comment on test_the_family_is_told_only_after_the_person_was:
+    # quiet hours would defer this notice on a default-timezone family.
+    family = await create_family(client, owner="owner-a", timezone=midday_timezone())
     await join(client, family, subject="owner-b", role="family")
     live = await _conversation(client, "owner-a", LONELY_AND_TOLD)
 
