@@ -1,3 +1,4 @@
+import { lazy, Suspense } from 'react';
 import { Toaster } from '@/components/ui/toaster';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { queryClientInstance } from '@/lib/query-client';
@@ -11,41 +12,53 @@ import RequireFamily from '@/components/RequireFamily';
 import Layout from '@/components/gamira/Layout';
 import { ThemeProvider } from '@/lib/ThemeContext';
 import Login from '@/pages/Login';
-import AcceptInvite from '@/pages/AcceptInvite';
-import InviteMember from '@/pages/InviteMember';
-import FamilyAccess from '@/pages/FamilyAccess';
-import Home from '@/pages/Home';
-import Health from '@/pages/Health';
-import HealthDetail from '@/pages/HealthDetail';
-import Reminders from '@/pages/Reminders';
-import Family from '@/pages/Family';
-import More from '@/pages/More';
-import AISummary from '@/pages/AISummary';
-import AIAssistant from '@/pages/AIAssistant';
-import GamiraMemory from "@/pages/GamiraMemory";
-import GamiraNoticed from "@/pages/GamiraNoticed";
-import AddReminder from '@/pages/AddReminder';
-import AddMember from '@/pages/AddMember';
-import MemberProfile from '@/pages/MemberProfile';
-import Medication from '@/pages/Medication';
-import AddMedicine from '@/pages/AddMedicine';
-import MedicineDetail from '@/pages/MedicineDetail';
-import Reports from '@/pages/Reports';
-import EmergencySOS from '@/pages/EmergencySOS';
-import Timeline from '@/pages/Timeline';
-import Notifications from '@/pages/Notifications';
-import SmartHome from '@/pages/SmartHome';
-import Settings from '@/pages/Settings';
-import Privacy from '@/pages/Privacy';
-import Subscription from '@/pages/Subscription';
-import Support from '@/pages/Support';
-import EditProfile from '@/pages/EditProfile';
-import About from '@/pages/About';
+
+// Lazy-loaded: everything behind sign-in. Login stays a static import so the
+// one public route has no extra network round trip; every other page is its
+// own chunk, fetched when its route is first visited. Route changes shared
+// the same 1.58 MB bundle before this.
+const AcceptInvite = lazy(() => import('@/pages/AcceptInvite'));
+const InviteMember = lazy(() => import('@/pages/InviteMember'));
+const FamilyAccess = lazy(() => import('@/pages/FamilyAccess'));
+const Home = lazy(() => import('@/pages/Home'));
+const Health = lazy(() => import('@/pages/Health'));
+const HealthDetail = lazy(() => import('@/pages/HealthDetail'));
+const Reminders = lazy(() => import('@/pages/Reminders'));
+const Family = lazy(() => import('@/pages/Family'));
+const More = lazy(() => import('@/pages/More'));
+const AISummary = lazy(() => import('@/pages/AISummary'));
+const AIAssistant = lazy(() => import('@/pages/AIAssistant'));
+const GamiraMemory = lazy(() => import('@/pages/GamiraMemory'));
+const GamiraNoticed = lazy(() => import('@/pages/GamiraNoticed'));
+const AddReminder = lazy(() => import('@/pages/AddReminder'));
+const AddMember = lazy(() => import('@/pages/AddMember'));
+const MemberProfile = lazy(() => import('@/pages/MemberProfile'));
+const Medication = lazy(() => import('@/pages/Medication'));
+const AddMedicine = lazy(() => import('@/pages/AddMedicine'));
+const MedicineDetail = lazy(() => import('@/pages/MedicineDetail'));
+const Reports = lazy(() => import('@/pages/Reports'));
+const EmergencySOS = lazy(() => import('@/pages/EmergencySOS'));
+const Timeline = lazy(() => import('@/pages/Timeline'));
+const Notifications = lazy(() => import('@/pages/Notifications'));
+const SmartHome = lazy(() => import('@/pages/SmartHome'));
+const Settings = lazy(() => import('@/pages/Settings'));
+const Privacy = lazy(() => import('@/pages/Privacy'));
+const Subscription = lazy(() => import('@/pages/Subscription'));
+const Support = lazy(() => import('@/pages/Support'));
+const EditProfile = lazy(() => import('@/pages/EditProfile'));
+const About = lazy(() => import('@/pages/About'));
+
+const RouteFallback = () => (
+  <div className="fixed inset-0 flex items-center justify-center">
+    <div className="w-8 h-8 border-4 border-secondary border-t-primary rounded-full animate-spin"></div>
+  </div>
+);
 
 // Sign-in is the only public route. Everything else sits behind
 // ProtectedRoute, which distinguishes "signed out" from "backend unreachable"
 // so a failed request never masquerades as an expired session.
 const AppRoutes = () => (
+  <Suspense fallback={<RouteFallback />}>
   <Routes>
     <Route path="/login" element={<Login />} />
     <Route element={<ProtectedRoute unauthenticatedElement={<RedirectToLogin />} />}>
@@ -87,6 +100,7 @@ const AppRoutes = () => (
     </Route>
     <Route path="*" element={<PageNotFound />} />
   </Routes>
+  </Suspense>
 );
 
 function App() {

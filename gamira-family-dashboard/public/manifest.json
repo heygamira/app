@@ -1,0 +1,19 @@
+{
+  "name": "Gamira Family Dashboard",
+  "short_name": "Gamira",
+  "description": "Stay connected to your loved ones' health and wellbeing.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F7F8FC",
+  "theme_color": "#2563EB",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

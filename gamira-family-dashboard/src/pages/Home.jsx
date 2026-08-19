@@ -6,7 +6,7 @@ import { useSwipeNav } from "@/lib/useSwipeNav";
 import { usePoll } from "@/lib/usePoll";
 import { careStatusFor } from "@/lib/careStatus";
 import { buildFamilySummary } from "@/lib/careSummary";
-import { dashboardApi, toMember } from "@/api/dashboardData";
+import { dashboardApi, dosesApi, toMember } from "@/api/dashboardData";
 import WelcomeCard from "@/components/gamira/WelcomeCard";
 import QuickActions from "@/components/gamira/QuickActions";
 import FamilySection from "@/components/gamira/FamilySection";
