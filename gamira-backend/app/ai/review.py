@@ -219,6 +219,19 @@ async def review(
         prompt_tokens=result.prompt_tokens,
         response_tokens=result.response_tokens,
     )
+    logger.info(
+        "ai_review_recorded",
+        extra={
+            "conversation_id": str(data.conversation.id),
+            "turns": data.turn_count,
+            "mood": output.mood,
+            "memories": len(output.memories),
+            "suggestions": len(output.suggested_reminders),
+            "notify_family": output.notify_family,
+            "told_them": output.told_them,
+            "summary_id": str(summary.id),
+        },
+    )
     return summary, output
 
 
@@ -271,6 +284,13 @@ async def notify(
         # Nothing is written yet. The caller enqueues it for the morning, and
         # `deliver_notice` below does the sending then — the same function, so
         # a notice that waited overnight is not a slightly different notice.
+        logger.info(
+            "ai_family_notice_held",
+            extra={
+                "conversation_id": str(data.conversation.id),
+                "until": hold.isoformat(),
+            },
+        )
         return Notice(sent=[], message=message, hold_until=hold)
 
     sent = await deliver_notice(
@@ -296,7 +316,7 @@ async def deliver_notice(
     dedupe_prefix: str,
 ) -> list[uuid.UUID]:
     """Put the notice in front of the family. One implementation, two callers."""
-    return await notify_family(
+    sent = await notify_family(
         session,
         family_id=family_id,
         template=NotificationRequest(
@@ -314,6 +334,11 @@ async def deliver_notice(
         exclude_user_ids=[exclude_user_id] if exclude_user_id else [],
         dedupe_prefix=dedupe_prefix,
     )
+    logger.info(
+        "ai_family_notice_sent",
+        extra={"summary_id": str(summary_id), "recipients": len(sent)},
+    )
+    return sent
 
 
 async def _record_summary(
@@ -496,6 +521,15 @@ async def suggest_reminders(
             target_id=reminder.id,
             family_id=reminder.family_id,
             metadata={"conversation_id": str(data.conversation.id)},
+        )
+        logger.info(
+            "ai_reminder_suggested",
+            extra={"reminder_id": str(reminder.id), "at": reminder.local_time},
+        )
+    if created:
+        logger.info(
+            "ai_memory_written",
+            extra={"conversation_id": str(data.conversation.id), "kept": created},
         )
     return created
 

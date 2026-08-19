@@ -126,6 +126,7 @@ class TimelineEventType(StrEnum):
     HEALTH_READING_ADDED = "health_reading_added"
     APPOINTMENT_SCHEDULED = "appointment_scheduled"
     SOS_TRIGGERED = "sos_triggered"
+    WELLBEING_CHECK = "wellbeing_check"
     MEMBER_JOINED = "member_joined"
     NOTE_ADDED = "note_added"
 
@@ -164,6 +165,7 @@ class NotificationType(StrEnum):
     APPOINTMENT = "appointment"
     SOS = "sos"
     SOS_ESCALATION = "sos_escalation"
+    WELLBEING_CHECK = "wellbeing_check"
     FAMILY_UPDATE = "family_update"
     SYSTEM = "system"
 
@@ -202,7 +204,16 @@ LIVE_JOB_STATUSES = frozenset({JobStatus.QUEUED, JobStatus.RUNNING})
 
 
 class AlertType(StrEnum):
+    """What an alert is about.
+
+    ``wellbeing_check`` is deliberately a separate type rather than a quieter
+    SOS. A watch left on a bedside table will leave its band; if that wore the
+    same treatment as somebody pressing the button, a family would learn to
+    ignore both, and the one that matters is the one they would stop looking at.
+    """
+
     SOS = "sos"
+    WELLBEING_CHECK = "wellbeing_check"
 
 
 class AlertSeverity(StrEnum):
@@ -212,10 +223,12 @@ class AlertSeverity(StrEnum):
 
 
 class AlertStatus(StrEnum):
-    """An SOS alert's lifecycle.
+    """An alert's lifecycle.
 
-    ``cancelled`` is only reachable through an explicit human flow and is never
-    available to the AI, a device or a background rule.
+    ``cancelled`` is reachable in exactly two ways: a person doing it in an app,
+    and the person the alert is *about* withdrawing their own by voice. Nothing
+    else — not a device, not a background rule, and not the assistant acting on
+    anybody else's alert. Acknowledgement and resolution stay human-only.
     """
 
     RAISED = "raised"
@@ -228,6 +241,25 @@ class AlertStatus(StrEnum):
 OPEN_ALERT_STATUSES = frozenset(
     {AlertStatus.RAISED, AlertStatus.ESCALATED, AlertStatus.ACKNOWLEDGED}
 )
+
+
+class WellbeingCheckStatus(StrEnum):
+    """Whether anybody answered when a device flagged something.
+
+    ``not_alright`` is what they said, not a finding: Gamira reports the answer
+    and a rule decides what follows. ``unreachable`` and ``no_answer`` are kept
+    apart because they are different facts — the app was never open, versus she
+    asked and nothing came back — and a family reads them differently.
+    """
+
+    PENDING = "pending"
+    ALRIGHT = "alright"
+    NOT_ALRIGHT = "not_alright"
+    NO_ANSWER = "no_answer"
+    UNREACHABLE = "unreachable"
+
+
+OPEN_WELLBEING_CHECK_STATUSES = frozenset({WellbeingCheckStatus.PENDING})
 
 
 class AlertSource(StrEnum):
@@ -252,8 +284,11 @@ class ActorType(StrEnum):
     """Who caused a recorded event.
 
     ``ai`` exists so an AI-originated action is always distinguishable in the
-    audit trail. It is never accepted on an alert acknowledgement, resolution
-    or cancellation.
+    audit trail. It is never accepted on an alert acknowledgement or
+    resolution, and on a cancellation only through the one narrow path in
+    ``services/alerts.py`` where the person is withdrawing their own alert out
+    loud — where it is recorded precisely so the trail says the assistant
+    carried it out.
     """
 
     USER = "user"

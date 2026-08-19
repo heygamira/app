@@ -32,8 +32,10 @@ from app.models.identity import SeniorProfile
 from app.schemas.care import DeviceFlagCreate, DeviceFlagOut
 from app.schemas.devices import DeviceOut, DeviceRegister
 from app.services import devices as device_service
+from app.services import wellbeing as wellbeing_service
 from app.services.authz import require_self_or_write_access
 from app.services.notifications import NotificationRequest, notify_family
+from app.services.realtime import publish_family_event
 from app.services.timeline import record_audit
 
 router = APIRouter(tags=["devices"])
@@ -124,6 +126,12 @@ async def raise_device_flag(
 
     Deliberately *not* an SOS: type `family_update`, no timeline entry, and
     wording that names the device as the one drawing the line.
+
+    It now also opens a **wellbeing check** — a durable row saying a question
+    is owed. Gamira asks it when the app is next open, and a rule in
+    ``jobs/handlers/care.py`` tells the family if nobody answers. The flag
+    itself kept no record at all before, which meant the one outcome worth
+    catching — a flagged reading followed by silence — was invisible.
     """
     await require_self_or_write_access(
         session, user_id=user.id, senior_profile_id=senior_id
@@ -158,6 +166,19 @@ async def raise_device_flag(
     )
     await session.flush()
 
+    check = await wellbeing_service.open_check(
+        session,
+        senior=senior,
+        # The device's own sentence, unaltered. Gamira reads it out as
+        # something her watch said, never as something she has concluded.
+        reason=f"{metric.capitalize()} {value} — {payload.reason}",
+        metric=payload.metric.value,
+        value=payload.value,
+        unit=payload.unit,
+        source_device=payload.source_device,
+        now=raised_at,
+    )
+
     await record_audit(
         session,
         action="device_flag.raised",
@@ -165,7 +186,14 @@ async def raise_device_flag(
         target_type="senior_profile",
         target_id=senior.id,
         family_id=senior.family_id,
-        metadata={"metric": payload.metric.value, "notified": len(notified)},
+        metadata={
+            "metric": payload.metric.value,
+            "notified": len(notified),
+            "wellbeing_check_id": str(check.id),
+        },
+    )
+    publish_family_event(
+        senior.family_id, "device_flag_raised", entity_type="notification"
     )
 
     return DeviceFlagOut(

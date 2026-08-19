@@ -211,7 +211,9 @@ async def test_invalid_arguments_are_refused_without_echoing_them(client, sessio
         session_id=live["session_id"],
         subject=subject,
         calls=[
-            call("mark_dose_taken", "fc-1", dose_event_id="not-a-uuid"),
+            call(
+                "mark_dose_taken", "fc-1", proposed_by="them", dose_event_id="not-a-uuid"
+            ),
             call("get_latest_health_readings", "fc-2", metric="blood-type"),
             call("get_today_doses", "fc-3", unexpected="value"),
         ],
@@ -250,7 +252,14 @@ async def test_a_fabricated_entity_id_is_not_found(client, session):
         client,
         session_id=live["session_id"],
         subject=subject,
-        calls=[call("mark_dose_taken", "fc-1", dose_event_id=str(uuid.uuid4()))],
+        calls=[
+            call(
+                "mark_dose_taken",
+                "fc-1",
+                proposed_by="them",
+                dose_event_id=str(uuid.uuid4()),
+            )
+        ],
     )
 
     assert body["results"][0]["response"]["error"] == "not_found"
@@ -270,7 +279,14 @@ async def test_another_familys_dose_id_is_not_found(client, session, run_worker)
         client,
         session_id=live["session_id"],
         subject=subject,
-        calls=[call("mark_dose_taken", "fc-1", dose_event_id=foreign_dose["id"])],
+        calls=[
+            call(
+                "mark_dose_taken",
+                "fc-1",
+                proposed_by="them",
+                dose_event_id=foreign_dose["id"],
+            )
+        ],
     )
 
     # Ownership, not existence: the same answer as an invented id.
@@ -364,7 +380,9 @@ async def test_a_viewer_who_is_not_the_person_cannot_record_their_dose(
         client,
         session_id=live["session_id"],
         subject="a-viewer",
-        calls=[call("mark_dose_taken", "fc-1", dose_event_id=dose["id"])],
+        calls=[
+            call("mark_dose_taken", "fc-1", proposed_by="them", dose_event_id=dose["id"])
+        ],
     )
 
     result = body["results"][0]
@@ -389,7 +407,14 @@ async def test_a_mutation_asks_for_confirmation_naming_the_target(
         client,
         session_id=live["session_id"],
         subject=subject,
-        calls=[call("mark_dose_taken", "fc-1", dose_event_id=dose["id"])],
+        calls=[
+                call(
+                    "mark_dose_taken",
+                    "fc-1",
+                    proposed_by="gamira",
+                    dose_event_id=dose["id"],
+                )
+            ],
     )
 
     result = body["results"][0]
@@ -421,7 +446,14 @@ async def test_confirming_records_one_dose_and_one_timeline_event(
             client,
             session_id=live["session_id"],
             subject=subject,
-            calls=[call("mark_dose_taken", "fc-1", dose_event_id=dose["id"])],
+            calls=[
+                call(
+                    "mark_dose_taken",
+                    "fc-1",
+                    proposed_by="gamira",
+                    dose_event_id=dose["id"],
+                )
+            ],
         )
     )["results"][0]
 
@@ -461,7 +493,14 @@ async def test_rejecting_a_confirmation_changes_nothing(client, session, run_wor
             client,
             session_id=live["session_id"],
             subject=subject,
-            calls=[call("mark_dose_taken", "fc-1", dose_event_id=dose["id"])],
+            calls=[
+                call(
+                    "mark_dose_taken",
+                    "fc-1",
+                    proposed_by="gamira",
+                    dose_event_id=dose["id"],
+                )
+            ],
         )
     )["results"][0]
 
@@ -496,7 +535,14 @@ async def test_a_rejected_decision_cannot_then_be_confirmed(client, session, run
             client,
             session_id=live["session_id"],
             subject=subject,
-            calls=[call("mark_dose_taken", "fc-1", dose_event_id=dose["id"])],
+            calls=[
+                call(
+                    "mark_dose_taken",
+                    "fc-1",
+                    proposed_by="gamira",
+                    dose_event_id=dose["id"],
+                )
+            ],
         )
     )["results"][0]
     await client.post(
@@ -523,7 +569,14 @@ async def test_an_expired_confirmation_does_not_execute(client, session, run_wor
             client,
             session_id=live["session_id"],
             subject=subject,
-            calls=[call("mark_dose_taken", "fc-1", dose_event_id=dose["id"])],
+            calls=[
+                call(
+                    "mark_dose_taken",
+                    "fc-1",
+                    proposed_by="gamira",
+                    dose_event_id=dose["id"],
+                )
+            ],
         )
     )["results"][0]
 
@@ -556,7 +609,14 @@ async def test_a_revocation_between_prompt_and_confirmation_blocks_it(
             client,
             session_id=live["session_id"],
             subject="carer",
-            calls=[call("mark_dose_taken", "fc-1", dose_event_id=dose["id"])],
+            calls=[
+                call(
+                    "mark_dose_taken",
+                    "fc-1",
+                    proposed_by="gamira",
+                    dose_event_id=dose["id"],
+                )
+            ],
         )
     )["results"][0]
 
@@ -584,7 +644,14 @@ async def test_another_person_cannot_confirm_somebody_elses_decision(
             client,
             session_id=live["session_id"],
             subject=subject,
-            calls=[call("mark_dose_taken", "fc-1", dose_event_id=dose["id"])],
+            calls=[
+                call(
+                    "mark_dose_taken",
+                    "fc-1",
+                    proposed_by="gamira",
+                    dose_event_id=dose["id"],
+                )
+            ],
         )
     )["results"][0]
 
@@ -640,7 +707,14 @@ async def test_repeating_a_confirmed_mutation_does_not_mutate_twice(
                 client,
                 session_id=live["session_id"],
                 subject=subject,
-                calls=[call("mark_dose_taken", call_id, dose_event_id=dose["id"])],
+                calls=[
+                    call(
+                        "mark_dose_taken",
+                        call_id,
+                        proposed_by="gamira",
+                        dose_event_id=dose["id"],
+                    )
+                ],
             )
         )["results"][0]
         await client.post(
@@ -863,7 +937,14 @@ async def test_a_mutation_by_voice_is_audited(client, session, run_worker):
             client,
             session_id=live["session_id"],
             subject=subject,
-            calls=[call("mark_dose_taken", "fc-1", dose_event_id=dose["id"])],
+            calls=[
+                call(
+                    "mark_dose_taken",
+                    "fc-1",
+                    proposed_by="gamira",
+                    dose_event_id=dose["id"],
+                )
+            ],
         )
     )["results"][0]
     await client.post(
@@ -928,6 +1009,7 @@ async def test_a_reminder_they_asked_for_is_simply_added(client, session):
                 "fc-1",
                 proposed_by="them",
                 title="water the plants",
+                repeat="daily",
                 local_time="16:30",
             )
         ],
@@ -957,6 +1039,7 @@ async def test_a_reminder_gamira_suggested_asks_first_and_names_it(client, sessi
                 "fc-1",
                 proposed_by="gamira",
                 title="water the plants",
+                repeat="daily",
                 local_time="16:30",
             )
         ],
@@ -964,8 +1047,10 @@ async def test_a_reminder_gamira_suggested_asks_first_and_names_it(client, sessi
 
     result = body["results"][0]
     assert result["requires_confirmation"] is True
+    # "every day" is in the wording now, because a daily reminder and a one-off
+    # are different things to agree to and the sentence has to say which.
     assert result["confirmation_prompt"] == (
-        "Add a reminder to water the plants at 4:30 PM?"
+        "Add a reminder to water the plants at 4:30 PM every day?"
     )
     # Nothing exists until a person says yes.
     assert await session.scalar(select(func.count()).select_from(Reminder)) == 0
@@ -986,7 +1071,15 @@ async def test_an_unstated_proposer_is_treated_as_a_suggestion(client, session):
         client,
         session_id=live["session_id"],
         subject=subject,
-        calls=[call("create_reminder", "fc-1", title="tea", local_time="16:00")],
+        calls=[
+            call(
+                "create_reminder",
+                "fc-1",
+                title="tea",
+                repeat="daily",
+                local_time="16:00",
+            )
+        ],
     )
     result = body["results"][0]
     assert result["ok"] is False
@@ -1010,6 +1103,7 @@ async def test_confirming_writes_the_reminder_against_the_verified_person(
                     "fc-1",
                     proposed_by="gamira",
                     title="walk to the park",
+                    repeat="daily",
                     local_time="07:15",
                     instructions="the short way round",
                 )
@@ -1050,6 +1144,7 @@ async def test_a_reminder_cannot_smuggle_in_a_medication_type(client, session):
                 "fc-1",
                 proposed_by="them",
                 title="Metformin",
+                repeat="daily",
                 local_time="08:00",
                 type="medication",
             )
@@ -1078,6 +1173,7 @@ async def test_a_time_that_is_not_a_time_is_refused(client, session):
                     f"fc-{bad}",
                     proposed_by="them",
                     title="tea",
+                    repeat="daily",
                     local_time=bad,
                 )
             ],
@@ -1117,6 +1213,7 @@ async def test_a_viewer_who_is_not_the_person_cannot_add_a_reminder(client, sess
                 "fc-1",
                 proposed_by="them",
                 title="tea",
+                repeat="daily",
                 local_time="16:00",
             )
         ],
@@ -1150,7 +1247,14 @@ async def _pending_dose_confirmation(client, session, run_worker):
             client,
             session_id=live["session_id"],
             subject=subject,
-            calls=[call("mark_dose_taken", "fc-1", dose_event_id=dose["id"])],
+            calls=[
+                call(
+                    "mark_dose_taken",
+                    "fc-1",
+                    proposed_by="gamira",
+                    dose_event_id=dose["id"],
+                )
+            ],
         )
     )["results"][0]
     assert proposed["requires_confirmation"] is True
@@ -1295,6 +1399,7 @@ async def test_asking_twice_while_it_is_still_on_screen_shows_one_dialog(
     arguments = {
         "proposed_by": "gamira",
         "title": "water the plants",
+        "repeat": "daily",
         "local_time": "16:30",
     }
 

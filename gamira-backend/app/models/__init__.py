@@ -23,6 +23,7 @@ from app.models.care import (
     NotificationDeliveryAttempt,
     Reminder,
     TimelineEvent,
+    WellbeingCheck,
 )
 from app.models.devices import RegisteredDevice
 from app.models.identity import (
@@ -63,4 +64,5 @@ __all__ = [
     "SeniorProfile",
     "TimelineEvent",
     "User",
+    "WellbeingCheck",
 ]

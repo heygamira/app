@@ -75,7 +75,11 @@ async def register_device(
         extra={
             "device_id": str(device.id),
             "platform": platform.value,
-            "created": created,
+            # Not "created": that name collides with LogRecord's own
+            # creation-timestamp attribute and logging.Logger.makeRecord
+            # raises KeyError("Attempt to overwrite 'created' in LogRecord")
+            # the moment this line runs.
+            "is_new": created,
             "token_rotated": rotated,
             # The fingerprint, never the token.
             "device": device.push_token_fingerprint,

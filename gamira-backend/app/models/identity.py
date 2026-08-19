@@ -79,13 +79,21 @@ class FamilyMembership(UUIDPrimaryKey, Timestamps, Base):
     __table_args__ = (
         # A user may hold at most one non-revoked membership per family; history
         # is preserved by keeping revoked rows.
+        #
+        # The predicate matches `MembershipStatus.REVOKED.name` ("REVOKED"), not
+        # `.value` ("revoked"): `Enum(..., native_enum=False)` with no
+        # `values_callable` stores a Python enum's *name*, not its value — the
+        # ORM round-trips this transparently, but a hand-written predicate has
+        # to know it. Confirmed against a real PostgreSQL server: the lowercase
+        # form silently never matched any row, so this partial index never
+        # actually rejected a second live membership.
         Index(
             "uq_family_memberships_family_user_live",
             "family_id",
             "user_id",
             unique=True,
-            sqlite_where=text("status <> 'revoked'"),
-            postgresql_where=text("status <> 'revoked'"),
+            sqlite_where=text(f"status <> '{MembershipStatus.REVOKED.name}'"),
+            postgresql_where=text(f"status <> '{MembershipStatus.REVOKED.name}'"),
         ),
     )
 
@@ -158,6 +166,11 @@ class FamilyInvitation(UUIDPrimaryKey, Timestamps, Base):
     invited_by_user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
     role: Mapped[MembershipRole] = mapped_column(
         Enum(MembershipRole, native_enum=False, length=16)
+    )
+    # Set only when this invitation is how a cared-for person links their own
+    # sign-in to their existing profile, rather than adding a new caregiver.
+    senior_profile_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("senior_profiles.id", ondelete="CASCADE"), index=True
     )
     # Only the hash is stored; the raw token is returned once, at creation.
     token_hash: Mapped[str] = mapped_column(String(64), unique=True)

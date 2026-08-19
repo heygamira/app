@@ -19,8 +19,11 @@ from app.models.enums import (
     ReminderStatus,
     ReminderType,
     TimelineEventType,
+    WellbeingCheckStatus,
 )
 from app.schemas.common import ApiModel
+from app.schemas.identity import SeniorOut
+from app.schemas.medication import DoseEventOut, MedicationOut
 from app.services.scheduling import load_timezone, parse_days_of_week
 
 # Ranges are plausibility bounds for data entry, not clinical thresholds. Gamira
@@ -115,6 +118,17 @@ class HealthReadingCreate(BaseModel):
     note: str | None = None
 
 
+class HealthReadingBulkCreate(BaseModel):
+    """A flushed batch from a paired device — one request, not one per metric.
+
+    Bounded well above what one flush ever holds (six metrics at most): the
+    limit is there to cap the cost of one request, not to accommodate a real
+    batch size anybody needs.
+    """
+
+    readings: list[HealthReadingCreate] = Field(min_length=1, max_length=50)
+
+
 class HealthReadingOut(ApiModel):
     id: uuid.UUID
     senior_profile_id: uuid.UUID
@@ -174,6 +188,34 @@ class DeviceFlagOut(BaseModel):
     raised_at: dt.datetime
     notified_user_ids: list[uuid.UUID]
     delivery: Literal["in_app_only"] = "in_app_only"
+
+
+class WellbeingCheckOut(BaseModel):
+    """A question Gamira owes this person, or one already answered.
+
+    ``reason`` is the device's own sentence and is passed through unchanged —
+    the Parent App shows it as something their watch said, never as a finding.
+    ``asked`` says whether the question was ever actually put, which is what
+    separates "they ignored it" from "nobody was there to ask".
+    """
+
+    id: uuid.UUID
+    senior_profile_id: uuid.UUID
+    status: WellbeingCheckStatus
+    reason: str
+    metric: str
+    value: float | None
+    unit: str | None
+    source_device: str | None
+    asked: bool
+    created_at: dt.datetime
+    answered_at: dt.datetime | None
+
+
+class WellbeingCheckAnswer(BaseModel):
+    """What they said, not what anybody concluded from it."""
+
+    alright: bool
 
 
 class EmergencyContactCreate(BaseModel):
@@ -251,3 +293,25 @@ class FamilyNoteOut(ApiModel):
     content: str
     author_user_id: uuid.UUID | None = None
     created_at: dt.datetime
+
+
+class DashboardSummaryOut(BaseModel):
+    """Everything the Family Dashboard's Home screen shows, for every senior
+    in the family, in one response.
+
+    Replaces what used to be six requests per senior: the dashboard fanned
+    out over its visible members for doses, health readings, medications,
+    timeline, appointments and reminders separately, on every poll tick. Each
+    list here already covers the whole family — the dashboard tells rows
+    apart by the ``senior_profile_id`` each already carries, matched against
+    the ``seniors`` list, the same way it already tells apart a fanned-out
+    response today.
+    """
+
+    seniors: list[SeniorOut]
+    doses: list[DoseEventOut]
+    health_readings: list[HealthReadingOut]
+    medications: list[MedicationOut]
+    timeline: list[TimelineEventOut]
+    appointments: list[AppointmentOut]
+    reminders: list[ReminderOut]

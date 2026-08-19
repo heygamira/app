@@ -26,21 +26,24 @@ from app.jobs.queue import JobResult, PermanentJobError
 from app.jobs.registry import JobContext, handler
 from app.jobs.types import JobType
 from app.models.alerts import Alert
-from app.models.care import Appointment, Reminder
+from app.models.care import Appointment, Reminder, WellbeingCheck
 from app.models.enums import (
     TERMINAL_DOSE_STATUSES,
     AppointmentStatus,
     DoseStatus,
+    MedicationStatus,
     MembershipStatus,
     NotificationStatus,
     NotificationType,
     ReminderStatus,
     TimelineEventType,
+    WellbeingCheckStatus,
 )
 from app.models.identity import FamilyMembership, SeniorProfile
-from app.models.medication import DoseEvent
+from app.models.medication import DoseEvent, Medication
 from app.services import alerts as alert_service
 from app.services import doses as dose_service
+from app.services import wellbeing as wellbeing_service
 from app.services.notifications import (
     NotificationRequest,
     create_notification,
@@ -274,23 +277,45 @@ async def _reminder_recipients(
 
 @handler(JobType.REMINDER_OCCURRENCES)
 async def process_reminder_occurrences(ctx: JobContext) -> JobResult:
-    """Fire non-medication recurring reminders as their local time comes round.
+    """Fire non-medication reminders as their local time comes round.
 
     A reminder has no per-occurrence row, so the occurrence's own local
     date-time is the dedupe key: hydration at 11:00 on 2026-08-17 can only
     notify once, no matter how often this sweep runs.
+
+    A **one-off** — "remind me in ten minutes" — is a reminder whose last
+    effective day is the day it fires, and it is completed once that day is
+    over, not the moment it fires. Completing it on the spot used to race the
+    Parent App's own proactive voice nudge: that nudge decides *only* from
+    `status == active`, polling on its own schedule, and this sweep runs every
+    minute regardless of whether anyone was ever told out loud — so a one-off
+    reminder was routinely flipped to `completed` before Gamira's own check
+    next ran, and a reminder nobody was ever told about read, from her side,
+    as already handled. Leaving it active for the rest of its day removes the
+    race; the per-occurrence dedupe key below already stops it renotifying,
+    and the Parent App's own once-a-day memory stops it renagging by voice.
     """
     now = utcnow()
+    # Bounded and ordered, matching the dose sweeps beside it: at one family this
+    # never mattered, but with no LIMIT at all this was a full scan of every active
+    # reminder across every family, every 60 seconds, growing without bound as
+    # families sign up. A family with more than 500 active reminders waits one
+    # extra tick — acceptable for a maintenance sweep, and no different from the
+    # missed-tick tolerance REMINDER_LOOKBACK already exists for.
     rows = await ctx.session.execute(
-        select(Reminder).where(
+        select(Reminder)
+        .where(
             Reminder.status == ReminderStatus.ACTIVE,
             Reminder.local_time.is_not(None),
         )
+        .order_by(Reminder.id)
+        .limit(500)
     )
     fired = 0
     for reminder in rows.scalars():
         occurrence = _current_occurrence(reminder, now)
         if occurrence is None:
+            _complete_if_lapsed(reminder, now)
             continue
         senior = await ctx.session.get(SeniorProfile, reminder.senior_profile_id)
         if senior is None:  # pragma: no cover
@@ -315,6 +340,26 @@ async def process_reminder_occurrences(ctx: JobContext) -> JobResult:
         fired += 1
     await ctx.session.flush()
     return JobResult(metrics={"reminders_fired": fired})
+
+
+def _complete_if_lapsed(reminder: Reminder, now: dt.datetime) -> None:
+    """Close out a one-off reminder once its day is fully behind it.
+
+    Completed rather than archived: a person can see what was set and that it
+    happened, which is the difference between a reminder and a thing that
+    quietly disappeared. Checked here, on a reminder that did *not* just fire,
+    so a one-off stays active — and voice-nudgeable — for the whole of its own
+    day rather than for the single sweep in which it happened to occur.
+    """
+    if not reminder.effective_to:
+        return
+    try:
+        local_today = now.astimezone(load_timezone(reminder.timezone)).date()
+    except Exception:
+        return
+    if local_today > reminder.effective_to:
+        reminder.status = ReminderStatus.COMPLETED
+        reminder.last_completed_at = now
 
 
 def _current_occurrence(reminder: Reminder, now: dt.datetime) -> str | None:
@@ -348,7 +393,12 @@ def _current_occurrence(reminder: Reminder, now: dt.datetime) -> str | None:
 
     due_local = dt.datetime.combine(today, at, tzinfo=tz)
     due_utc = due_local.astimezone(dt.UTC)
-    if not (now - REMINDER_LOOKBACK <= due_utc <= now + REMINDER_LOOKAHEAD):
+    # Backward tolerance only: a reminder is due once its moment has actually
+    # arrived, never before. This used to also tolerate REMINDER_LOOKAHEAD
+    # (2 minutes) *ahead* of due, which let a one-off reminder set for "in a
+    # few minutes" fire — and, before the fix above, complete itself — while
+    # its own countdown was still running.
+    if not (due_utc <= now <= due_utc + REMINDER_LOOKBACK):
         return None
     return f"{today.isoformat()}T{reminder.local_time}"
 
@@ -495,6 +545,58 @@ async def check_alert_escalations(ctx: JobContext) -> JobResult:
 
 
 # --------------------------------------------------------------------------- #
+# Wellbeing checks
+# --------------------------------------------------------------------------- #
+
+
+@handler(JobType.WELLBEING_CHECK_ESCALATE)
+async def escalate_wellbeing_checks(ctx: JobContext) -> JobResult:
+    """Nobody answered a flagged reading, so tell the family.
+
+    This is the whole reason the feature is safe to build: the decision to
+    escalate is elapsed time and a stored answer, evaluated here, with no model
+    anywhere near it. Gamira asks the question and writes down the reply; she
+    cannot raise this, cannot suppress it, and cannot make it come sooner or
+    later. A check that was answered "alright" simply is not in the sweep.
+
+    Named in the payload or swept, like the alert escalation beside it, so the
+    two paths cannot drift apart.
+    """
+    now = utcnow()
+    raw_id = ctx.payload.get("check_id")
+    if raw_id:
+        try:
+            check = await ctx.session.get(WellbeingCheck, uuid.UUID(str(raw_id)))
+        except ValueError:
+            raise PermanentJobError("invalid_check_id") from None
+        candidates = [check] if check is not None else []
+    else:
+        candidates = await wellbeing_service.checks_due(ctx.session, now=now)
+
+    raised = 0
+    for check in candidates:
+        if check is None:
+            continue
+        # A "not alright" answer escalates at once; anything still pending
+        # waits for its own clock, so a targeted job that arrives early does
+        # nothing rather than cutting the grace period short.
+        if check.status is WellbeingCheckStatus.PENDING:
+            if check.escalate_at is None or check.escalate_at > now:
+                continue
+        elif check.status is not WellbeingCheckStatus.NOT_ALRIGHT:
+            continue
+        senior = await ctx.session.get(SeniorProfile, check.senior_profile_id)
+        if senior is None:  # pragma: no cover
+            continue
+        alert = await wellbeing_service.escalate_check(
+            ctx.session, check=check, senior=senior, settings=ctx.settings, now=now
+        )
+        if alert is not None:
+            raised += 1
+    return JobResult(metrics={"wellbeing_alerts_raised": raised})
+
+
+# --------------------------------------------------------------------------- #
 # Shared
 # --------------------------------------------------------------------------- #
 
@@ -512,8 +614,19 @@ async def _target_seniors(ctx: JobContext) -> list[SeniorProfile]:
             raise PermanentJobError("senior_not_found")
         return [senior]
 
+    # Every non-archived senior in every family, narrowed to the ones an active
+    # medication could actually produce a dose for. Without this, a senior with
+    # no medications at all still cost a `generate_dose_events` round trip on
+    # every 5-minute tick, forever, purely because they exist as a row.
     rows = await ctx.session.execute(
-        select(SeniorProfile).where(SeniorProfile.archived_at.is_(None))
+        select(SeniorProfile).where(
+            SeniorProfile.archived_at.is_(None),
+            SeniorProfile.id.in_(
+                select(Medication.senior_profile_id).where(
+                    Medication.status == MedicationStatus.ACTIVE
+                )
+            ),
+        )
     )
     return list(rows.scalars())
 

@@ -15,8 +15,13 @@ Three kinds of tool, and the difference decides where each one runs:
   function the ordinary endpoint uses.
 
 Whether a mutation is confirmed first is a property of the tool, not of the
-model's mood. Anything clinical or irreversible always is. A couple of everyday
-ones are confirmed only when *Gamira* is the one proposing them — see
+model's mood. Anything that opens an emergency flow or a dialer always is —
+those are irreversible enough, or public enough, that a person asking out loud
+is not by itself enough of a gate. Everything else is confirmed only when
+*Gamira* is the one proposing it: a person telling her directly that they took
+a dose, set a reminder, or want their family told something *is* the
+confirmation, and putting a second dialog in front of what they just said is a
+hurdle, not a safeguard — worst for the person least able to clear it. See
 ``needs_confirmation`` at the bottom of this file, which is where that rule
 lives, in code, rather than in a prompt.
 
@@ -261,6 +266,19 @@ CATALOGUE: dict[str, ToolSpec] = {
         parameters=_object(),
         requires_confirmation=True,
     ),
+    "cancel_sos_countdown": ToolSpec(
+        name="cancel_sos_countdown",
+        kind="client",
+        description=(
+            "Stop the SOS countdown that is running on their screen, because "
+            "they have said they are alright. Use this the moment they say "
+            "cancel, stop, no, or that they are fine. Nothing has been sent to "
+            "anybody yet, so nothing is being undone and nobody needs to "
+            "confirm it. If the countdown has already finished, this will tell "
+            "you so — then use cancel_my_sos instead."
+        ),
+        parameters=_object(),
+    ),
     "prepare_call_contact": ToolSpec(
         name="prepare_call_contact",
         kind="client",
@@ -278,32 +296,41 @@ CATALOGUE: dict[str, ToolSpec] = {
         name="mark_dose_taken",
         kind="mutation",
         description=(
-            "Record that one scheduled dose was taken. Requires the person to "
+            "Record that one scheduled dose was taken. If they told you they "
+            "have taken it, mark it and say so — that is the whole product. If "
+            "you are the one asking whether they have, they are asked to "
             "confirm first. Never use this to change what a medicine is or how "
             "much of it to take."
         ),
-        parameters=_object({"dose_event_id": _UUID}, required=["dose_event_id"]),
-        requires_confirmation=True,
+        parameters=_object(
+            {"proposed_by": _PROPOSED_BY, "dose_event_id": _UUID},
+            required=["proposed_by", "dose_event_id"],
+        ),
+        confirm_when_unasked=True,
     ),
     "mark_dose_skipped": ToolSpec(
         name="mark_dose_skipped",
         kind="mutation",
         description=(
-            "Record that one scheduled dose was skipped. Requires the person "
-            "to confirm first."
+            "Record that one scheduled dose was skipped. If they told you they "
+            "are skipping it, mark it and say so. If you are the one asking "
+            "whether they have, they are asked to confirm first."
         ),
-        parameters=_object({"dose_event_id": _UUID}, required=["dose_event_id"]),
-        requires_confirmation=True,
+        parameters=_object(
+            {"proposed_by": _PROPOSED_BY, "dose_event_id": _UUID},
+            required=["proposed_by", "dose_event_id"],
+        ),
+        confirm_when_unasked=True,
     ),
     "create_reminder": ToolSpec(
         name="create_reminder",
         kind="mutation",
         description=(
-            "Add an everyday reminder for this person — a routine like drinking "
-            "water, a walk, watering the plants, or ringing somebody. If they "
-            "asked for it, it is added straight away and you simply tell them "
-            "you have. If you are suggesting it, they are asked to confirm "
-            "first. "
+            "Add a reminder for this person — either a daily routine like "
+            "drinking water, a walk or watering the plants, or a one-off like "
+            "'remind me in ten minutes' or 'tell me at four'. If they asked for "
+            "it, it is added straight away and you simply tell them you have. "
+            "If you are suggesting it, they are asked to confirm first. "
             "This is NOT for medicines: you cannot add, change or schedule a "
             "medication or a dose, and asking for one this way does not make it "
             "allowed. If they want a medicine added, say that a family member "
@@ -317,10 +344,34 @@ CATALOGUE: dict[str, ToolSpec] = {
                     "maxLength": 120,
                     "description": "What the reminder is for, in their own words.",
                 },
+                "repeat": {
+                    "type": "string",
+                    "enum": ["daily", "once"],
+                    "description": (
+                        "'once' for a single reminder today — 'in ten minutes', "
+                        "'at four this afternoon'. 'daily' for something they "
+                        "want every day at the same time. Ask if it is not "
+                        "clear; do not assume they want it every day forever."
+                    ),
+                },
+                "in_minutes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 720,
+                    "description": (
+                        "How many minutes from now, when they say it that way — "
+                        "'in five minutes', 'in an hour'. Do not work out the "
+                        "clock time yourself; give the number of minutes and it "
+                        "is worked out for you, in their timezone. Always 'once'."
+                    ),
+                },
                 "local_time": {
                     "type": "string",
                     "pattern": r"^([01][0-9]|2[0-3]):[0-5][0-9]$",
-                    "description": "Time of day as 24-hour HH:MM in their timezone.",
+                    "description": (
+                        "Time of day as 24-hour HH:MM in their timezone, when "
+                        "they name a time. Give this or in_minutes, never both."
+                    ),
                 },
                 "instructions": {
                     "type": "string",
@@ -328,7 +379,7 @@ CATALOGUE: dict[str, ToolSpec] = {
                     "description": "Anything else they said about it. Optional.",
                 },
             },
-            required=["proposed_by", "title", "local_time"],
+            required=["proposed_by", "title", "repeat"],
         ),
         confirm_when_unasked=True,
     ),
@@ -348,6 +399,46 @@ CATALOGUE: dict[str, ToolSpec] = {
         # Completing somebody else's reminder is a care action; doing your own
         # is not. The policy engine applies this the same way it does for doses.
         min_role=None,
+    ),
+    "tell_family": ToolSpec(
+        name="tell_family",
+        kind="mutation",
+        description=(
+            "Pass a message to this person's family, in their Gamira app, "
+            "because this person wants them to know something. Use it whenever "
+            "they say they are unwell, in pain, worried, lonely or not "
+            "themselves, and whenever they ask you to tell their family "
+            "anything at all. Say what they told you, in their own terms and "
+            "in one or two plain sentences — what they said, not what you "
+            "concluded, and never a cause, a diagnosis or a suggestion of what "
+            "anybody should do about it. "
+            "This is not an emergency and does not read as one: their family "
+            "sees a quiet note and can ring them. If they are asking for help "
+            "right now, that is prepare_sos, not this. "
+            "Tell them you are doing it, in your own words, and never send a "
+            "message you have not said out loud to them first."
+        ),
+        parameters=_object(
+            {
+                "proposed_by": _PROPOSED_BY,
+                "message": {
+                    "type": "string",
+                    "maxLength": 300,
+                    "description": (
+                        "What to tell their family, written about this person "
+                        "in the third person: \"Vikram said he has had a "
+                        "headache since this morning.\" Their own words where "
+                        "you have them."
+                    ),
+                },
+            },
+            required=["proposed_by", "message"],
+        ),
+        # Nobody asked for a note the person did not want sent, so a suggestion
+        # is confirmed like any other. Them asking is the confirmation: being
+        # made to clear a dialog to tell your own family you feel unwell is
+        # exactly the hurdle this exists to remove.
+        confirm_when_unasked=True,
     ),
     "remember_this": ToolSpec(
         name="remember_this",
@@ -390,6 +481,46 @@ CATALOGUE: dict[str, ToolSpec] = {
     # decides anything: the action, its arguments and its wording were all
     # settled when the confirmation was raised, and these two only carry the
     # answer back to the decision already sitting in the database.
+    "cancel_my_sos": ToolSpec(
+        name="cancel_my_sos",
+        kind="mutation",
+        description=(
+            "Withdraw an emergency alert that has already gone to this "
+            "person's family, because they have told you they are alright. "
+            "Only ever their own, only when they have said so themselves, and "
+            "never because it seems likely. Their family is told it was "
+            "cancelled, and the alert stays in their record — you are not "
+            "making it disappear. You still cannot acknowledge or close an "
+            "alert in any other way."
+        ),
+        parameters=_object(),
+        requires_confirmation=True,
+    ),
+    "answer_wellbeing_check": ToolSpec(
+        name="answer_wellbeing_check",
+        kind="mutation",
+        description=(
+            "Report what this person said when you asked how they were after "
+            "their watch flagged a reading. Say what they actually said: "
+            "'alright' if they told you they are fine, 'not_alright' if they "
+            "told you they are not. If they did not answer, or you are not "
+            "sure, do not call this at all — silence is handled without you "
+            "and guessing at it would be worse than leaving it."
+        ),
+        parameters=_object(
+            {
+                "they_are": {
+                    "type": "string",
+                    "enum": ["alright", "not_alright"],
+                    "description": (
+                        "What they told you. Not what you concluded from how "
+                        "they sounded, and not what the reading suggests."
+                    ),
+                }
+            },
+            required=["they_are"],
+        ),
+    ),
     "confirm_pending_action": ToolSpec(
         name="confirm_pending_action",
         kind="mutation",

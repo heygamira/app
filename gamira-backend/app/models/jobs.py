@@ -28,6 +28,15 @@ from app.db.base import Base, Timestamps, UUIDPrimaryKey, utcnow
 from app.db.types import UtcDateTime
 from app.models.enums import JobStatus
 
+# The predicate matches the enum members' *names* ("QUEUED", "RUNNING"), not
+# their `.value` ("queued", "running"): `Enum(..., native_enum=False)` with no
+# `values_callable` stores a Python enum's name — the ORM round-trips this
+# transparently, but a hand-written predicate has to know it. Confirmed
+# against a real PostgreSQL server: the lowercase form silently never matched
+# any row, so this partial index never actually rejected a second live job
+# with the same dedupe key.
+_LIVE_JOB_PREDICATE = f"status IN ('{JobStatus.QUEUED.name}', '{JobStatus.RUNNING.name}')"
+
 
 class BackgroundJob(UUIDPrimaryKey, Timestamps, Base):
     """One unit of durable work.
@@ -45,8 +54,8 @@ class BackgroundJob(UUIDPrimaryKey, Timestamps, Base):
             "uq_background_jobs_dedupe_live",
             "dedupe_key",
             unique=True,
-            sqlite_where=text("status IN ('queued', 'running')"),
-            postgresql_where=text("status IN ('queued', 'running')"),
+            sqlite_where=text(_LIVE_JOB_PREDICATE),
+            postgresql_where=text(_LIVE_JOB_PREDICATE),
         ),
         # The claim query's access path: ready work, most urgent first.
         Index("ix_background_jobs_claim", "status", "run_after", "priority"),

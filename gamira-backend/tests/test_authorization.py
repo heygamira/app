@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
+
 from tests.conftest import auth
 
 
@@ -144,6 +146,100 @@ async def test_a_senior_can_confirm_their_own_dose_while_read_only(
 
     assert response.status_code == 200
     assert response.json()["status"] == "taken"
+
+
+async def test_an_invitation_can_link_a_senior_to_their_own_account(client, session):
+    """A senior-linking invitation attaches the profile without a manual poke.
+
+    Superseded the manual ``senior.user_id = ...`` write that
+    ``test_a_senior_can_confirm_their_own_dose_while_read_only`` still does —
+    this is the real path an assisted setup would use.
+    """
+    from app.models.identity import SeniorProfile
+
+    family_id, senior_id = await _family_with_senior(client, "owner-a", "Family A")
+
+    invitation = await client.post(
+        f"/api/v1/families/{family_id}/invitations",
+        # A caregiver role is requested but must be downgraded: a senior is
+        # never invited in with authority over their own family's records.
+        json={"role": "caregiver", "senior_profile_id": senior_id},
+        headers=auth("owner-a"),
+    )
+    assert invitation.status_code == 201
+    assert invitation.json()["invitation"]["role"] == "viewer"
+    token = invitation.json()["token"]
+
+    accepted = await client.post(
+        f"/api/v1/invitations/{token}/accept", headers=auth("the-senior")
+    )
+    assert accepted.status_code == 200
+    assert accepted.json()["role"] == "viewer"
+
+    senior = await session.get(SeniorProfile, uuid.UUID(senior_id))
+    linked_user_id = str(senior.user_id)
+
+    me = (await client.get("/api/v1/me", headers=auth("the-senior"))).json()
+    assert me["user"]["id"] == linked_user_id
+
+
+async def test_an_invitation_refuses_to_link_an_already_linked_senior(client):
+    family_id, senior_id = await _family_with_senior(client, "owner-a", "Family A")
+
+    first = await client.post(
+        f"/api/v1/families/{family_id}/invitations",
+        json={"role": "viewer", "senior_profile_id": senior_id},
+        headers=auth("owner-a"),
+    )
+    await client.post(
+        f"/api/v1/invitations/{first.json()['token']}/accept", headers=auth("senior-a")
+    )
+
+    second = await client.post(
+        f"/api/v1/families/{family_id}/invitations",
+        json={"role": "viewer", "senior_profile_id": senior_id},
+        headers=auth("owner-a"),
+    )
+
+    assert second.status_code == 409
+    assert second.json()["error"]["code"] == "senior_already_linked"
+
+
+async def test_the_membership_partial_index_rejects_two_live_rows_directly(session):
+    """Bypass the service check and confirm the database is the real authority.
+
+    Mirrors ``test_jobs_postgres.py``'s equivalent test for
+    ``uq_background_jobs_dedupe_live`` — that PostgreSQL-only test caught its
+    predicate matching nothing on either dialect (migration ``0013`` fixes
+    both). Nothing before this distinguished SQLite from PostgreSQL here
+    either, so nothing did.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    from app.models.enums import MembershipRole
+    from app.models.identity import Family, FamilyMembership, User
+
+    user = User(external_auth_id="sqlite-test|racy", auth_provider="dev")
+    session.add(user)
+    await session.flush()
+    family = Family(name="Racy family", created_by_user_id=user.id)
+    session.add(family)
+    await session.flush()
+    session.add(
+        FamilyMembership(family_id=family.id, user_id=user.id, role=MembershipRole.OWNER)
+    )
+    await session.commit()
+
+    session.add(
+        FamilyMembership(
+            family_id=family.id, user_id=user.id, role=MembershipRole.CAREGIVER
+        )
+    )
+    with pytest.raises(IntegrityError):
+        await session.commit()
+    # The `session` fixture commits again on teardown; leaving the session in
+    # its post-failure state would turn that into a second, unrelated error.
+    await session.rollback()
 
 
 async def test_an_unrelated_viewer_still_cannot_record_a_dose(client, run_worker):

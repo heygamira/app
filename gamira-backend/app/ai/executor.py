@@ -54,6 +54,8 @@ from app.ai.validation import ArgumentError, validate_arguments
 from app.core.config import Settings, get_settings
 from app.core.logging import current_request_id, get_logger
 from app.db.base import utcnow
+from app.jobs.queue import URGENT_PRIORITY, enqueue_job
+from app.jobs.types import JobType
 from app.models.ai import AiDecision, LiveSession
 from app.models.care import Reminder
 from app.models.enums import (
@@ -64,14 +66,19 @@ from app.models.enums import (
     DoseStatus,
     LiveSessionStatus,
     MemoryKind,
+    NotificationType,
     PolicyResult,
     ReminderStatus,
     ReminderType,
     TimelineEventType,
 )
 from app.models.medication import DoseEvent
+from app.services import alerts as alert_service
 from app.services import doses as dose_service
 from app.services import memories as memory_service
+from app.services import wellbeing as wellbeing_service
+from app.services.notifications import NotificationRequest, notify_family
+from app.services.scheduling import load_timezone
 from app.services.timeline import record_audit, record_timeline_event
 
 logger = get_logger(__name__)
@@ -141,6 +148,48 @@ async def execute_tool_call(
     settings: Settings | None = None,
     now: dt.datetime | None = None,
 ) -> ToolOutcome:
+    """Run one tool call, and say out loud that it happened.
+
+    The work is all in :func:`_execute_tool_call`; this wrapper exists so that
+    every single outcome produces exactly one log line, including the ones that
+    used to produce none. Before this, a *successful* tool call was invisible —
+    an allowed one wrote an ``AiDecision`` row and a policy denial wrote
+    nothing at all — so the only evidence that Gamira had done anything was a
+    ``POST …/tool-calls 200`` in the access log. Something that can change a
+    care record should not be the quietest thing in the system.
+
+    Ids, names and enum values only. No arguments, because they carry the dose
+    and the reminder text; no messages, because those are written for the
+    person. The console shows what was decided, not what was said.
+    """
+    outcome = await _execute_tool_call(
+        session, live_session=live_session, call=call, settings=settings, now=now
+    )
+    logger.info(
+        "ai_tool_call",
+        extra={
+            "tool": call.name,
+            "outcome": (
+                "confirming"
+                if outcome.requires_confirmation
+                else ("done" if outcome.ok else "refused")
+            ),
+            "error": None if outcome.ok else outcome.response.get("error"),
+            "decision_id": str(outcome.decision_id) if outcome.decision_id else None,
+            "live_session_id": str(live_session.id),
+        },
+    )
+    return outcome
+
+
+async def _execute_tool_call(
+    session: AsyncSession,
+    *,
+    live_session: LiveSession,
+    call: ToolCall,
+    settings: Settings | None = None,
+    now: dt.datetime | None = None,
+) -> ToolOutcome:
     """Run one tool call through every check, then execute or refuse."""
     settings = settings or get_settings()
     now = now or utcnow()
@@ -173,6 +222,7 @@ async def execute_tool_call(
 
     try:
         arguments = validate_arguments(spec.parameters, call.arguments)
+        check_semantics(spec, arguments)
     except ArgumentError as exc:
         # The field and the reason, never the value the model sent.
         return _refuse(
@@ -212,7 +262,7 @@ async def execute_tool_call(
     if actor is not None:
         entity, ownership_error = await _resolve_entity(session, spec, arguments, actor)
         if ownership_error is not None:
-            return _refuse(call, ownership_error, "I could not find that here.")
+            return _refuse(call, ownership_error, _not_found_message(spec))
 
     # Worked out here, from the spec and the validated arguments, and handed to
     # the policy engine — which stays ignorant of both the arguments and the
@@ -606,6 +656,16 @@ async def _run_tool(
         return await _remember_this(
             session, actor=actor, arguments=arguments, decision=decision
         )
+    if name == "tell_family":
+        return await _tell_family(
+            session, actor=actor, arguments=arguments, decision=decision
+        )
+    if name == "cancel_my_sos":
+        return await _cancel_my_sos(session, actor=actor, alert=entity)
+    if name == "answer_wellbeing_check":
+        return await _answer_wellbeing_check(
+            session, actor=actor, check=entity, arguments=arguments, decision=decision
+        )
 
     # Client tools are dispatched in the browser and must never arrive here.
     raise ValueError(f"Tool {name!r} has no backend implementation.")
@@ -664,8 +724,24 @@ async def _create_reminder(
       from anything said in the conversation.
     * ``timezone`` is the person's own, so "half four" means half four where
       they are.
+
+    "In five minutes" is worked out **here**, from the person's stored
+    timezone, rather than by the model. The model does not know what time it is
+    where they are — the clock tool runs in the browser — so asking it to
+    compute "now plus five minutes" would make a reminder depend on whether it
+    happened to call that tool first. It gives a number of minutes; the backend
+    owns the clock.
+
+    A one-off is bounded by ``effective_from == effective_to``, which
+    ``_current_occurrence`` already honours, and the occurrence job completes it
+    once it has fired. Without that bound "remind me in five minutes" would
+    become a permanent daily alarm at that minute, which is worse than not
+    working at all.
     """
     title = arguments["title"].strip()
+    once = arguments.get("repeat") == "once"
+    local_time, on_day = _reminder_when(actor, arguments)
+
     reminder = Reminder(
         family_id=actor.senior.family_id,
         senior_profile_id=actor.senior.id,
@@ -674,8 +750,12 @@ async def _create_reminder(
         instructions=(arguments.get("instructions") or "").strip() or None,
         # Empty means every day, which is what somebody asking out loud means.
         days_of_week="",
-        local_time=arguments["local_time"],
+        local_time=local_time,
         timezone=actor.senior.timezone,
+        # A one-off lives for exactly one local day. Everything that reads a
+        # schedule already respects these two dates.
+        effective_from=on_day if once else None,
+        effective_to=on_day if once else None,
         status=ReminderStatus.ACTIVE,
         created_by_user_id=actor.user.id,
     )
@@ -695,14 +775,119 @@ async def _create_reminder(
     )
     await session.flush()
 
+    spoken = _spoken_time(reminder.local_time or "")
     return (
         {
             "reminder_id": str(reminder.id),
             "title": reminder.title,
             "local_time": reminder.local_time,
-            "message": f"{reminder.title} is set for {reminder.local_time} every day.",
+            "repeat": "once" if once else "daily",
+            "message": (
+                f"{reminder.title} is set for {spoken} today."
+                if once
+                else f"{reminder.title} is set for {spoken} every day."
+            ),
         },
         ("reminder", reminder.id),
+    )
+
+
+def _reminder_when(
+    actor: ActorContext, arguments: dict[str, Any]
+) -> tuple[str, dt.date]:
+    """The clock time and local day a new reminder is for.
+
+    Which of ``in_minutes`` and ``local_time`` was given is settled by
+    :func:`check_semantics` before anything is shown to anybody, so by here
+    exactly one of them is present.
+    """
+    minutes = arguments.get("in_minutes")
+    named = arguments.get("local_time")
+    zone = load_timezone(actor.senior.timezone)
+    now_local = utcnow().astimezone(zone)
+    if minutes is not None:
+        at = now_local + dt.timedelta(minutes=int(minutes))
+        return at.strftime("%H:%M"), at.date()
+    return str(named), now_local.date()
+
+
+async def _cancel_my_sos(
+    session: AsyncSession,
+    *,
+    actor: ActorContext,
+    alert: Any,
+) -> tuple[dict[str, Any], tuple[str, uuid.UUID]]:
+    """Withdraw this person's own open alert, because they said they are alright.
+
+    The only cancellation an assistant can reach, and the service function is
+    where every restriction on it lives — it cannot touch anybody else's alert,
+    cannot touch a resolved one, keeps the row, and tells the family. Nothing
+    is decided here; this is the person's own sentence, carried out.
+    """
+    cancelled, notified = await alert_service.cancel_own_by_voice(
+        session,
+        alert=alert,
+        senior=actor.senior,
+        actor_user_id=actor.user.id,
+    )
+    return (
+        {
+            "alert_id": str(cancelled.id),
+            "message": (
+                "The alert is cancelled and your family has been told you are "
+                "alright."
+                if notified
+                else "The alert is cancelled."
+            ),
+        },
+        ("alert", cancelled.id),
+    )
+
+
+async def _answer_wellbeing_check(
+    session: AsyncSession,
+    *,
+    actor: ActorContext,
+    check: Any,
+    arguments: dict[str, Any],
+    decision: AiDecision,
+) -> tuple[dict[str, Any], tuple[str, uuid.UUID]]:
+    """Write down the answer to "are you alright?" and nothing else.
+
+    No confirmation, because being asked to confirm that you said you were fine
+    is absurd, and because this changes nothing about anybody's care — it
+    records a sentence. What follows from the sentence is decided by a rule
+    with no model in it: an ``alright`` answer takes the check out of the sweep,
+    and a ``not_alright`` one puts the sweep in front of it now rather than at
+    the end of the grace period.
+    """
+    alright = arguments["they_are"] == "alright"
+    await wellbeing_service.record_answer(
+        session,
+        check=check,
+        alright=alright,
+        actor_user_id=actor.user.id,
+        conversation_id=decision.conversation_id,
+    )
+    if not alright:
+        await enqueue_job(
+            session,
+            JobType.WELLBEING_CHECK_ESCALATE,
+            payload={"check_id": str(check.id)},
+            dedupe_key=f"wellbeing-now:{check.id}",
+            priority=URGENT_PRIORITY,
+            family_id=check.family_id,
+        )
+    return (
+        {
+            "recorded": True,
+            "message": (
+                "Noted, thank you."
+                if alright
+                else "I have let your family know you are not feeling right."
+            ),
+        },
+        ("wellbeing_check", check.id),
     )
 
 
@@ -760,6 +945,95 @@ async def _remember_this(
     )
 
 
+async def _tell_family(
+    session: AsyncSession,
+    *,
+    actor: ActorContext,
+    arguments: dict[str, Any],
+    decision: AiDecision,
+) -> tuple[dict[str, Any], tuple[str, uuid.UUID] | None]:
+    """Pass on something this person wants their family to know.
+
+    The gap this fills is the ordinary one, and it was the whole of the middle.
+    Saying "I have a headache" had two possible endings: an emergency alert,
+    which is not what that is, or nothing at all until the after-call review
+    ran — and that only sends anything if the model *said* it would, only once
+    the conversation has ended, and only when the worker gets to it. So the
+    commonest thing anybody would want to say to their family reached them
+    late, or never.
+
+    A notification, never an alert. Three things follow from that and none of
+    them are negotiable:
+
+    * it cannot be escalated, acknowledged or resolved, because it is not an
+      alert and has no lifecycle to move through;
+    * it says who it came from and that it came from a conversation, so nobody
+      reads it as a device measuring something;
+    * and it is not urgent by construction — the urgent path is an alert, which
+      Gamira cannot raise.
+
+    The message is the model's sentence, which is the point: it has to be able
+    to say what they actually said. What it cannot do is decide *whether* to
+    send — that is `needs_confirmation`, and an unasked one is confirmed.
+    """
+    message = " ".join(str(arguments["message"]).split())[:300]
+    senior = actor.senior
+    name = senior.preferred_name
+
+    timeline = await record_timeline_event(
+        session,
+        family_id=senior.family_id,
+        senior_profile_id=senior.id,
+        type=TimelineEventType.NOTE_ADDED,
+        title=f"{name} asked Gamira to tell you something",
+        description=message,
+        related_entity_type="ai_decision",
+        related_entity_id=decision.id,
+        actor_user_id=actor.user.id,
+        dedupe_key=f"tell-family:{decision.id}",
+    )
+
+    notified = await notify_family(
+        session,
+        family_id=senior.family_id,
+        template=NotificationRequest(
+            user_id=uuid.uuid4(),  # replaced per recipient
+            type=NotificationType.FAMILY_UPDATE,
+            title=f"{name} asked Gamira to tell you",
+            body=message,
+            senior_profile_id=senior.id,
+            related_entity_type="ai_decision",
+            related_entity_id=decision.id,
+            # In the app, not on a lock screen. Push for this would need a
+            # judgement about urgency that nothing here is entitled to make.
+            push=False,
+        ),
+        # They do not need telling about their own message.
+        exclude_user_ids=[actor.user.id],
+        dedupe_prefix=f"tell-family:{decision.id}",
+    )
+    await session.flush()
+
+    logger.info(
+        "ai_told_family",
+        extra={"decision_id": str(decision.id), "recipients": len(notified)},
+    )
+    return (
+        {
+            "told": len(notified),
+            "message": (
+                "Your family can see that in their Gamira app now."
+                if notified
+                else (
+                    "There is nobody else in your family app yet, so I have "
+                    "kept it in your record."
+                )
+            ),
+        },
+        ("timeline_event", timeline.id),
+    )
+
+
 async def _complete_reminder(
     session: AsyncSession, *, actor: ActorContext, reminder: Reminder
 ) -> tuple[dict[str, Any], tuple[str, uuid.UUID]]:
@@ -808,6 +1082,27 @@ async def _resolve_entity(
     existence — and why a foreign id gets the same "not found" as an invented
     one.
     """
+    # Two tools take no id at all: what they act on is *this person's own*
+    # open alert, or their own owed question. Nothing is looked up from
+    # anything the model said, so there is no id for it to invent, confuse
+    # between conversations or be read one over the phone.
+    if spec.name == "cancel_my_sos":
+        open_alerts = await alert_service.open_alerts_for_senior(
+            session, actor.senior.id
+        )
+        if not open_alerts:
+            return None, ERROR_NOT_FOUND
+        # The newest, because that is the one they are talking about.
+        return open_alerts[0], None
+
+    if spec.name == "answer_wellbeing_check":
+        pending = await wellbeing_service.pending_for_senior(session, actor.senior.id)
+        if not pending:
+            return None, ERROR_NOT_FOUND
+        # The oldest, because it has been waiting longest and is the one about
+        # to escalate.
+        return pending[0], None
+
     dose_id = arguments.get("dose_event_id")
     if dose_id:
         event = await session.get(DoseEvent, uuid.UUID(str(dose_id)))
@@ -863,16 +1158,77 @@ def _confirmation_prompt(
         # the same values that will be written, not a paraphrase of them.
         args = arguments or {}
         title = args.get("title") or "a reminder"
-        return f"Add a reminder to {title} at {_spoken_time(args.get('local_time', ''))}?"
+        minutes = args.get("in_minutes")
+        if minutes is not None:
+            unit = "minute" if int(minutes) == 1 else "minutes"
+            return f"Remind you to {title} in {int(minutes)} {unit}?"
+        when = _spoken_time(args.get("local_time", ""))
+        if args.get("repeat") == "once":
+            return f"Remind you to {title} at {when} today?"
+        return f"Add a reminder to {title} at {when} every day?"
+    if spec.name == "tell_family":
+        # The message itself, in full. Confirming "tell your family something?"
+        # would be asking somebody to approve a sentence they have not read.
+        note = " ".join(str((arguments or {}).get("message", "")).split())
+        return f"Tell your family: “{note}”?" if note else "Tell your family?"
     if spec.name == "complete_reminder":
         title = entity.title if isinstance(entity, Reminder) else "this reminder"
         return f"Mark {title} as done?"
     if spec.name == "prepare_sos":
         return "Open the emergency SOS screen?"
+    if spec.name == "cancel_my_sos":
+        # Says what actually happens to it, both halves. Somebody agreeing to
+        # this should not be surprised later that their family was told, or
+        # that it is still in their record.
+        return (
+            "Tell your family you are alright and cancel the alert? "
+            "They will see that you cancelled it."
+        )
     if spec.name == "prepare_call_contact":
         name = getattr(entity, "name", None)
         return f"Open the dialer to call {name}?" if name else "Open the dialer?"
     return f"Go ahead with {spec.name.replace('_', ' ')}?"  # pragma: no cover
+
+
+def check_semantics(spec: ToolSpec, arguments: dict[str, Any]) -> None:
+    """Rules a JSON schema cannot state, checked in the same breath as it.
+
+    JSON Schema can say "an integer between 1 and 720"; it cannot say "this one
+    *or* that one, never both, never neither" without a ``oneOf`` the hand-
+    rolled validator does not support and the Live API would have to accept.
+
+    So it lives here, next to the schema pass, and raises the same
+    :class:`ArgumentError` — which means a call that gets this wrong comes back
+    as the ordinary structured refusal naming the field, and the model can fix
+    it and try again, rather than as "that did not work" after a person has
+    already been shown a confirmation for it.
+    """
+    if spec.name != "create_reminder":
+        return
+    minutes = arguments.get("in_minutes")
+    named = arguments.get("local_time")
+    if minutes is None and named is None:
+        raise ArgumentError("local_time", "required")
+    if minutes is not None and named is not None:
+        raise ArgumentError("in_minutes", "conflicts_with_local_time")
+    # "In ten minutes, every day" is not a thing anybody means.
+    if minutes is not None and arguments.get("repeat") != "once":
+        raise ArgumentError("repeat", "in_minutes_is_always_once")
+
+
+def _not_found_message(spec: ToolSpec) -> str:
+    """What she says when the thing a tool acts on is not there.
+
+    Generic for the id-taking tools, because a wrong id and a foreign id must
+    be indistinguishable. Specific for the two that take no id, where "I could
+    not find that here" would answer a question nobody asked — somebody who has
+    just said "cancel" needs to be told plainly that there is nothing running.
+    """
+    if spec.name == "cancel_my_sos":
+        return "There is no alert open at the moment, so there is nothing to cancel."
+    if spec.name == "answer_wellbeing_check":
+        return "There is nothing waiting on an answer just now."
+    return "I could not find that here."
 
 
 def _spoken_time(local_time: str) -> str:

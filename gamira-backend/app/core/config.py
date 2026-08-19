@@ -133,6 +133,12 @@ class Settings(BaseSettings):
     # concurrency cap is what stops a looping client minting forever.
     live_provisional_ttl_seconds: int = 120
     live_provisional_max_concurrent: int = 2
+    # A ceiling on *guesses*, on the server. The concurrent cap above can never
+    # bind — a guess is abandoned after two seconds and the next is five apart —
+    # so without this the only limit on how many tokens a noisy room can mint
+    # was a constant in the browser. Loose on purpose: a person really talking
+    # to Gamira will not come near it.
+    live_provisional_per_hour: int = 60
     ai_requests_per_hour: int = 60
     # How long a confirmation prompt stays answerable before it expires.
     ai_confirmation_ttl_seconds: int = 300
@@ -149,6 +155,10 @@ class Settings(BaseSettings):
     # family to look back over a fortnight, short enough that a voice companion
     # is not building an indefinite record of somebody's private talk.
     conversation_retention_days: int = 30
+    # How long a flagged reading waits for an answer before the family is told.
+    # Long enough that somebody in another room can come back to the phone;
+    # short enough to be worth anything at all.
+    wellbeing_check_grace_minutes: int = 10
 
     file_storage_backend: Literal["local", "gcs"] = "local"
     file_storage_dir: str = "./.local-storage"

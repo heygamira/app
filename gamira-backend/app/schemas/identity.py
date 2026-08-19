@@ -90,12 +90,17 @@ class InvitationCreate(BaseModel):
     role: MembershipRole = MembershipRole.FAMILY
     email: EmailStr | None = None
     phone: str | None = Field(default=None, max_length=32)
+    # Set to link this invitation to an existing cared-for person: accepting
+    # it attaches the accepting user's account to that senior profile instead
+    # of only adding them as a new caregiver.
+    senior_profile_id: uuid.UUID | None = None
 
 
 class InvitationOut(ApiModel):
     id: uuid.UUID
     family_id: uuid.UUID
     role: MembershipRole
+    senior_profile_id: uuid.UUID | None = None
     invited_email: str | None = None
     expires_at: dt.datetime
 

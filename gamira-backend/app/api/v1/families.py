@@ -6,17 +6,30 @@ import uuid
 
 from fastapi import APIRouter, status
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from app.api.deps import CurrentUser, SessionDep
+from app.api.v1.medications import _dose_out, _resolve_window
 from app.core.errors import Conflict, NotFound
 from app.db.base import utcnow
+from app.models.care import Appointment, HealthReading, Reminder, TimelineEvent
 from app.models.enums import (
     ConsentStatus,
+    MedicationStatus,
     MembershipRole,
     MembershipStatus,
+    ReminderStatus,
     TimelineEventType,
 )
 from app.models.identity import Family, FamilyMembership, SeniorProfile, User
+from app.models.medication import DoseEvent, Medication
+from app.schemas.care import (
+    AppointmentOut,
+    DashboardSummaryOut,
+    HealthReadingOut,
+    ReminderOut,
+    TimelineEventOut,
+)
 from app.schemas.identity import (
     FamilyCreate,
     FamilyOut,
@@ -29,6 +42,7 @@ from app.schemas.identity import (
     SeniorOut,
     SeniorUpdate,
 )
+from app.schemas.medication import DoseEventOut, MedicationOut
 from app.services import identity as identity_service
 from app.services.authz import (
     require_membership,
@@ -141,13 +155,28 @@ async def create_invitation(
             "Only an owner can invite another owner.", code="owner_invite_forbidden"
         )
 
+    role = payload.role
+    if payload.senior_profile_id is not None:
+        senior = await session.get(SeniorProfile, payload.senior_profile_id)
+        if senior is None or senior.family_id != family_id:
+            raise NotFound("The requested person does not exist.")
+        if senior.user_id is not None:
+            raise Conflict(
+                "This person's profile is already linked to an account.",
+                code="senior_already_linked",
+            )
+        # A senior is a viewer of their own family record, never invited in
+        # with a caregiver's authority over it.
+        role = MembershipRole.VIEWER
+
     invitation, raw_token = await identity_service.create_invitation(
         session,
         family_id=family_id,
         invited_by=user,
-        role=payload.role,
+        role=role,
         email=str(payload.email) if payload.email else None,
         phone=payload.phone,
+        senior_profile_id=payload.senior_profile_id,
     )
     await record_audit(
         session,
@@ -338,4 +367,114 @@ async def archive_senior(
         target_type="senior_profile",
         target_id=senior.id,
         family_id=senior.family_id,
+    )
+
+
+@router.get(
+    "/families/{family_id}/dashboard-summary", response_model=DashboardSummaryOut
+)
+async def dashboard_summary(
+    family_id: uuid.UUID, session: SessionDep, user: CurrentUser
+) -> DashboardSummaryOut:
+    """Everything the dashboard's Home screen shows, for every senior in the
+    family, in one request.
+
+    Replaces the fan-out the frontend used to do itself: six requests per
+    senior shown (`...ForMembers` in the dashboard's own dashboardData.js),
+    every poll tick, so a three-senior family cost eighteen requests every
+    five seconds from one open tab. Every model here already carries
+    `family_id`, so each list below is one indexed query — except doses,
+    which stay one query per senior because "today" is resolved in that
+    senior's own timezone, exactly as the single-senior route does.
+    """
+    await require_membership(session, user_id=user.id, family_id=family_id)
+
+    senior_rows = await session.execute(
+        select(SeniorProfile)
+        .where(
+            SeniorProfile.family_id == family_id,
+            SeniorProfile.archived_at.is_(None),
+        )
+        .order_by(SeniorProfile.created_at)
+    )
+    seniors = list(senior_rows.scalars())
+    # How many seniors' worth of "recent" is still recent for the family as a
+    # whole — bounding the family-wide feeds without reintroducing a per-senior
+    # request for each of them.
+    fan_out = max(1, len(seniors))
+
+    doses = []
+    for senior in seniors:
+        window_start, window_end = _resolve_window(senior.timezone, None, None)
+        rows = await session.execute(
+            select(DoseEvent)
+            .options(
+                selectinload(DoseEvent.medication), selectinload(DoseEvent.schedule)
+            )
+            .where(
+                DoseEvent.senior_profile_id == senior.id,
+                DoseEvent.scheduled_at_utc >= window_start,
+                DoseEvent.scheduled_at_utc < window_end,
+            )
+            .order_by(DoseEvent.scheduled_at_utc)
+        )
+        doses.extend(_dose_out(event) for event in rows.scalars().unique())
+
+    health_rows = await session.execute(
+        select(HealthReading)
+        .where(HealthReading.family_id == family_id)
+        .order_by(HealthReading.measured_at.desc())
+        .limit(min(200, 40 * fan_out))
+    )
+    health_readings = [
+        HealthReadingOut.model_validate(row) for row in health_rows.scalars()
+    ]
+
+    medication_rows = await session.execute(
+        select(Medication)
+        .options(selectinload(Medication.schedules))
+        .where(
+            Medication.family_id == family_id,
+            Medication.status != MedicationStatus.ARCHIVED,
+        )
+        .order_by(Medication.created_at.desc())
+    )
+    medications = [
+        MedicationOut.model_validate(row) for row in medication_rows.scalars().unique()
+    ]
+
+    timeline_rows = await session.execute(
+        select(TimelineEvent)
+        .where(TimelineEvent.family_id == family_id)
+        .order_by(TimelineEvent.occurred_at.desc())
+        .limit(min(150, 30 * fan_out))
+    )
+    timeline = [TimelineEventOut.model_validate(row) for row in timeline_rows.scalars()]
+
+    appointment_rows = await session.execute(
+        select(Appointment)
+        .where(Appointment.family_id == family_id)
+        .order_by(Appointment.starts_at.desc())
+    )
+    appointments = [
+        AppointmentOut.model_validate(row) for row in appointment_rows.scalars()
+    ]
+
+    reminder_rows = await session.execute(
+        select(Reminder)
+        .where(
+            Reminder.family_id == family_id, Reminder.status != ReminderStatus.ARCHIVED
+        )
+        .order_by(Reminder.local_time.nulls_last(), Reminder.created_at)
+    )
+    reminders = [ReminderOut.model_validate(row) for row in reminder_rows.scalars()]
+
+    return DashboardSummaryOut(
+        seniors=[SeniorOut.model_validate(senior) for senior in seniors],
+        doses=doses,
+        health_readings=health_readings,
+        medications=medications,
+        timeline=timeline,
+        appointments=appointments,
+        reminders=reminders,
     )

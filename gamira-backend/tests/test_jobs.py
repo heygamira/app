@@ -81,6 +81,43 @@ async def test_a_dedupe_key_is_reusable_once_its_job_finished(job_queue, run_wor
     assert again is not None
 
 
+async def test_the_partial_index_rejects_two_live_rows_directly(session):
+    """Bypass the service check and confirm the database is the real authority.
+
+    Mirrors ``test_jobs_postgres.py``'s test of the same name — added after
+    that PostgreSQL-only test caught the predicate matching nothing on either
+    dialect (see migration ``0013``). Nothing before this distinguished
+    SQLite from PostgreSQL here, so nothing did either.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    session.add(
+        BackgroundJob(
+            job_type="test.counts",
+            payload={},
+            dedupe_key="racy",
+            run_after=utcnow(),
+            max_attempts=1,
+        )
+    )
+    await session.commit()
+
+    session.add(
+        BackgroundJob(
+            job_type="test.counts",
+            payload={},
+            dedupe_key="racy",
+            run_after=utcnow(),
+            max_attempts=1,
+        )
+    )
+    with pytest.raises(IntegrityError):
+        await session.commit()
+    # The `session` fixture commits again on teardown; leaving the session in
+    # its post-failure state would turn that into a second, unrelated error.
+    await session.rollback()
+
+
 async def test_only_one_worker_claims_a_job(sessionmaker, worker_settings):
     """Two workers, one job, one claim. The other gets nothing."""
     queue_a = DatabaseJobQueue(sessionmaker, settings=worker_settings)

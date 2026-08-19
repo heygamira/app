@@ -506,9 +506,22 @@ async def promote_live_session(
 
 
 async def _enforce_hourly_limit(
-    db: AsyncSession, *, user_id: uuid.UUID, settings: Settings, now: dt.datetime
+    db: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    settings: Settings,
+    now: dt.datetime,
+    provisional: bool = False,
+    limit: int | None = None,
 ) -> None:
-    """Real sessions started in the last hour. Guesses do not count."""
+    """How many sessions of one kind this person has opened in the last hour.
+
+    Counted separately for real ones and for guesses, because they mean
+    different things: a real session is a conversation somebody had, and a
+    guess is the detector being wrong. Both cost a minted token, so both are
+    capped — the guesses far more loosely, since one of them is what makes a
+    real "Gamira" answer immediately.
+    """
     recent = int(
         await db.scalar(
             select(func.count())
@@ -516,12 +529,20 @@ async def _enforce_hourly_limit(
             .where(
                 LiveSession.user_id == user_id,
                 LiveSession.created_at >= now - dt.timedelta(hours=1),
-                LiveSession.provisional.is_(False),
+                LiveSession.provisional.is_(provisional),
             )
         )
         or 0
     )
-    if recent >= settings.live_sessions_per_hour:
+    ceiling = settings.live_sessions_per_hour if limit is None else limit
+    if recent >= ceiling:
+        if provisional:
+            # Not the person's fault and not something they can act on, so the
+            # wording is about listening rather than about talking.
+            raise RateLimited(
+                "Gamira has been mishearing her name too often; "
+                "hands-free listening is paused for a little while."
+            )
         raise RateLimited("Too many voice sessions in the last hour.")
 
 
@@ -562,8 +583,21 @@ async def _enforce_limits(
             code="too_many_live_sessions",
         )
 
-    # A guess is not a conversation, so it does not spend the hourly allowance.
-    # `promote_live_session` charges for it if it becomes one.
+    if provisional:
+        # A guess does not spend the *conversation* allowance — `promote_live_
+        # session` charges for it if it becomes one — but it is not free
+        # either: it mints a real token. It had no server-side ceiling at all,
+        # which meant the only thing standing between a noisy room and an
+        # unbounded number of billed calls was a constant in browser
+        # JavaScript. A limit that ships in the client is not a limit.
+        await _enforce_hourly_limit(
+            db,
+            user_id=user_id,
+            settings=settings,
+            now=now,
+            provisional=True,
+            limit=settings.live_provisional_per_hour,
+        )
     if not provisional:
         await _enforce_hourly_limit(db, user_id=user_id, settings=settings, now=now)
 
@@ -629,7 +663,13 @@ async def close_live_session(
             if conversation is not None:
                 conversation.status = ConversationStatus.ENDED
                 conversation.ended_at = now
-                await _queue_review(db, conversation=conversation, now=now)
+                # The same guard `expire_stale_sessions` has, and it was missing
+                # here — which is the path an *abandoned* guess actually takes.
+                # So every wake word that came to nothing queued a job to read
+                # back a conversation in which nobody had said anything: a row,
+                # a worker wake-up and a log line, hundreds of times an hour.
+                if not live_session.provisional:
+                    await _queue_review(db, conversation=conversation, now=now)
         await db.flush()
     return live_session
 

@@ -25,7 +25,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.core.config import get_settings
 from app.db.base import Base, utcnow
 from app.jobs.queue import DatabaseJobQueue
-from app.models.enums import JobStatus
+from app.models.enums import JobStatus, MembershipRole
+from app.models.identity import Family, FamilyMembership, User
 from app.models.jobs import BackgroundJob
 
 POSTGRES_URL = os.environ.get("TEST_POSTGRES_URL", "")
@@ -136,6 +137,42 @@ async def test_the_partial_index_rejects_two_live_rows_directly(
                 dedupe_key="racy",
                 run_after=utcnow(),
                 max_attempts=1,
+            )
+        )
+        with pytest.raises(IntegrityError):
+            await session.commit()
+
+
+async def test_the_membership_partial_index_rejects_two_live_rows_directly(
+    pg_sessionmaker,
+):
+    """The same class of bug, in the other partial-unique index in the schema.
+
+    ``uq_family_memberships_family_user_live`` had the identical defect as
+    the job-dedupe index: written against the enum's lowercase ``.value``
+    while the column actually stores its uppercase name.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    async with pg_sessionmaker() as session:
+        user = User(external_auth_id="pg-test|racy", auth_provider="dev")
+        session.add(user)
+        await session.flush()
+        family = Family(name="Racy family", created_by_user_id=user.id)
+        session.add(family)
+        await session.flush()
+        session.add(
+            FamilyMembership(
+                family_id=family.id, user_id=user.id, role=MembershipRole.OWNER
+            )
+        )
+        await session.commit()
+        family_id, user_id = family.id, user.id
+
+    async with pg_sessionmaker() as session:
+        session.add(
+            FamilyMembership(
+                family_id=family_id, user_id=user_id, role=MembershipRole.CAREGIVER
             )
         )
         with pytest.raises(IntegrityError):

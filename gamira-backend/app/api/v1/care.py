@@ -12,6 +12,8 @@ from sqlalchemy import select
 from app.api.deps import CurrentUser, SessionDep
 from app.core.errors import NotFound, ValidationFailed
 from app.db.base import Base, utcnow
+from app.jobs.queue import URGENT_PRIORITY, enqueue_job
+from app.jobs.types import JobType
 from app.models.care import (
     Appointment,
     EmergencyContact,
@@ -20,6 +22,7 @@ from app.models.care import (
     NotificationDelivery,
     Reminder,
     TimelineEvent,
+    WellbeingCheck,
 )
 from app.models.enums import (
     HealthSource,
@@ -27,6 +30,7 @@ from app.models.enums import (
     NotificationStatus,
     ReminderStatus,
     TimelineEventType,
+    WellbeingCheckStatus,
 )
 from app.models.identity import SeniorProfile
 from app.schemas.care import (
@@ -39,6 +43,7 @@ from app.schemas.care import (
     EmergencyContactUpdate,
     FamilyNoteCreate,
     FamilyNoteOut,
+    HealthReadingBulkCreate,
     HealthReadingCreate,
     HealthReadingOut,
     NotificationOut,
@@ -46,7 +51,10 @@ from app.schemas.care import (
     ReminderOut,
     ReminderUpdate,
     TimelineEventOut,
+    WellbeingCheckAnswer,
+    WellbeingCheckOut,
 )
+from app.services import wellbeing as wellbeing_service
 from app.services.authz import (
     require_membership,
     require_self_or_write_access,
@@ -209,34 +217,19 @@ async def list_health_readings(
     return [HealthReadingOut.model_validate(row) for row in rows.scalars()]
 
 
-@router.post(
-    "/seniors/{senior_id}/health-readings",
-    response_model=HealthReadingOut,
-    status_code=status.HTTP_201_CREATED,
-)
-async def create_health_reading(
-    senior_id: uuid.UUID,
-    payload: HealthReadingCreate,
+async def _create_reading(
     session: SessionDep,
+    senior: SeniorProfile,
     user: CurrentUser,
-) -> HealthReadingOut:
-    """Store one measurement.
+    payload: HealthReadingCreate,
+) -> HealthReading:
+    """Validate and store one measurement — the body the single and bulk
+    routes below both call, so their rules cannot drift apart.
 
     The unit must match the one Gamira stores for that metric, and the value
     must be physically plausible. Neither check is a clinical judgement: the
     backend never labels a reading as healthy or unhealthy.
-
-    A person may always record their own measurement — from the Parent App or
-    from a watch paired to their own account. Recording someone else's still
-    needs a write role, so a doctor or viewer cannot add readings to another
-    person's record.
     """
-    await require_self_or_write_access(
-        session, user_id=user.id, senior_profile_id=senior_id
-    )
-    senior = await session.get(SeniorProfile, senior_id)
-    if senior is None:  # pragma: no cover - the helper above already raised
-        raise NotFound("The requested person does not exist.")
     expected_unit, minimum, maximum = METRIC_UNITS[payload.metric]
     if payload.unit != expected_unit:
         raise ValidationFailed(
@@ -280,7 +273,158 @@ async def create_health_reading(
             actor_user_id=user.id,
             occurred_at=payload.measured_at,
         )
+    return reading
+
+
+@router.post(
+    "/seniors/{senior_id}/health-readings",
+    response_model=HealthReadingOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_health_reading(
+    senior_id: uuid.UUID,
+    payload: HealthReadingCreate,
+    session: SessionDep,
+    user: CurrentUser,
+) -> HealthReadingOut:
+    """Store one measurement.
+
+    A person may always record their own measurement — from the Parent App or
+    from a watch paired to their own account. Recording someone else's still
+    needs a write role, so a doctor or viewer cannot add readings to another
+    person's record.
+    """
+    await require_self_or_write_access(
+        session, user_id=user.id, senior_profile_id=senior_id
+    )
+    senior = await session.get(SeniorProfile, senior_id)
+    if senior is None:  # pragma: no cover - the helper above already raised
+        raise NotFound("The requested person does not exist.")
+    reading = await _create_reading(session, senior, user, payload)
     return HealthReadingOut.model_validate(reading)
+
+
+@router.post(
+    "/seniors/{senior_id}/health-readings/bulk",
+    response_model=list[HealthReadingOut],
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_health_readings_bulk(
+    senior_id: uuid.UUID,
+    payload: HealthReadingBulkCreate,
+    session: SessionDep,
+    user: CurrentUser,
+) -> list[HealthReadingOut]:
+    """The same store, for a batch — a paired watch's relay flushing several
+    metrics at once rather than one request per metric.
+
+    Access is resolved once for the whole batch, not once per reading: the
+    point of a bulk endpoint is fewer round trips, and re-checking membership
+    fifty times inside one request would give most of that back.
+    """
+    await require_self_or_write_access(
+        session, user_id=user.id, senior_profile_id=senior_id
+    )
+    senior = await session.get(SeniorProfile, senior_id)
+    if senior is None:  # pragma: no cover - the helper above already raised
+        raise NotFound("The requested person does not exist.")
+    readings = [
+        await _create_reading(session, senior, user, item) for item in payload.readings
+    ]
+    return [HealthReadingOut.model_validate(reading) for reading in readings]
+
+
+# --------------------------------------------------------------------------- #
+# Wellbeing checks
+# --------------------------------------------------------------------------- #
+
+
+@router.get(
+    "/seniors/{senior_id}/wellbeing-checks",
+    response_model=list[WellbeingCheckOut],
+)
+async def list_wellbeing_checks(
+    senior_id: uuid.UUID,
+    session: SessionDep,
+    user: CurrentUser,
+    pending_only: bool = Query(default=True),
+    limit: int = Query(default=20, ge=1, le=MAX_PAGE_SIZE),
+) -> list[WellbeingCheckOut]:
+    """Questions a device flagging a reading has left owed.
+
+    The Parent App polls this so Gamira can ask; the family can read it too,
+    because "your watch flagged something and we asked" is about them and they
+    are entitled to see it without asking anybody.
+    """
+    await resolve_senior(session, user_id=user.id, senior_id=senior_id)
+    statement = (
+        select(WellbeingCheck)
+        .where(WellbeingCheck.senior_profile_id == senior_id)
+        .order_by(WellbeingCheck.created_at.desc())
+        .limit(limit)
+    )
+    if pending_only:
+        statement = statement.where(
+            WellbeingCheck.status == WellbeingCheckStatus.PENDING
+        )
+    rows = await session.execute(statement)
+    return [_wellbeing_out(row) for row in rows.scalars()]
+
+
+@router.post(
+    "/wellbeing-checks/{check_id}/answer",
+    response_model=WellbeingCheckOut,
+)
+async def answer_wellbeing_check(
+    check_id: uuid.UUID,
+    payload: WellbeingCheckAnswer,
+    session: SessionDep,
+    user: CurrentUser,
+) -> WellbeingCheckOut:
+    """Answer by tapping, for somebody who cannot answer by speaking.
+
+    Voice is the intended path and the reason this feature exists, but a person
+    whose microphone is broken, or who simply does not want to talk, must still
+    be able to say they are fine. Without this the only way to stop the alert
+    would be to not have the problem.
+    """
+    check = await session.get(WellbeingCheck, check_id)
+    if check is None:
+        raise NotFound("The requested check does not exist.")
+    await require_self_or_write_access(
+        session, user_id=user.id, senior_profile_id=check.senior_profile_id
+    )
+    await wellbeing_service.record_answer(
+        session, check=check, alright=payload.alright, actor_user_id=user.id
+    )
+    if not payload.alright:
+        # They said they are not alright, so the rule runs now rather than at
+        # the end of the grace period. It is still the rule that decides.
+        await enqueue_job(
+            session,
+            JobType.WELLBEING_CHECK_ESCALATE,
+            payload={"check_id": str(check.id)},
+            dedupe_key=f"wellbeing-now:{check.id}",
+            priority=URGENT_PRIORITY,
+            family_id=check.family_id,
+        )
+    return _wellbeing_out(check)
+
+
+def _wellbeing_out(check: WellbeingCheck) -> WellbeingCheckOut:
+    return WellbeingCheckOut(
+        id=check.id,
+        senior_profile_id=check.senior_profile_id,
+        status=check.status,
+        reason=check.reason,
+        metric=check.metric,
+        value=check.value,
+        unit=check.unit,
+        source_device=check.source_device,
+        asked=check.asked_at is not None,
+        created_at=check.created_at,
+        answered_at=check.answered_at,
+    )
 
 
 # --------------------------------------------------------------------------- #

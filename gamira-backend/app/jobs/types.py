@@ -19,6 +19,10 @@ class JobType:
     NOTIFICATION_DELIVER: Final = "notifications.deliver"
     NOTIFICATION_RETRY_SWEEP: Final = "notifications.retry_sweep"
     ALERT_ESCALATION_CHECK: Final = "alerts.escalation_check"
+    # Deliberately in this block and not the AI one: what escalates an
+    # unanswered wellbeing check is a rule about elapsed time, and it must
+    # still run with every model in the world unreachable.
+    WELLBEING_CHECK_ESCALATE: Final = "wellbeing.escalate"
 
     # AI. Every one of these may fail without affecting the list above.
     AI_WEEKLY_SUMMARY: Final = "ai.weekly_summary"

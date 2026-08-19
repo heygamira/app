@@ -32,6 +32,7 @@ from app.models.enums import (
     ReminderStatus,
     ReminderType,
     TimelineEventType,
+    WellbeingCheckStatus,
 )
 
 
@@ -254,6 +255,63 @@ class EmergencyContact(UUIDPrimaryKey, Timestamps, Base):
     verified_at: Mapped[dt.datetime | None] = mapped_column(UtcDateTime())
 
 
+class WellbeingCheck(UUIDPrimaryKey, Timestamps, Base):
+    """A device said a number left its band, so somebody asked.
+
+    This table exists because the flag itself is not durable: ``POST
+    /seniors/{id}/device-flags`` raises a notice and keeps no row, so nothing
+    could remember that a question had been asked, let alone that nobody
+    answered it. Noticing the silence is the entire point.
+
+    What is stored is the *device's* claim (``reason``, in its own words) and
+    the person's *answer*. The backend forms no opinion about the reading at
+    any point, and neither does Gamira: she asks, they answer, and a rule in
+    ``jobs/handlers/care.py`` decides what follows. Nothing here is clinical
+    and nothing here is evidence about anybody's health.
+    """
+
+    __tablename__ = "wellbeing_checks"
+    __table_args__ = (
+        Index("ix_wellbeing_checks_senior_status", "senior_profile_id", "status"),
+        Index("ix_wellbeing_checks_open", "status", "escalate_at"),
+    )
+
+    family_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("families.id", ondelete="CASCADE"), index=True
+    )
+    senior_profile_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("senior_profiles.id", ondelete="CASCADE"), index=True
+    )
+    status: Mapped[WellbeingCheckStatus] = mapped_column(
+        Enum(WellbeingCheckStatus, native_enum=False, length=16),
+        default=WellbeingCheckStatus.PENDING,
+    )
+    # The device's own words for why it flagged this. Never rewritten, never
+    # interpreted, and never used as a threshold by anything here.
+    reason: Mapped[str] = mapped_column(String(300))
+    metric: Mapped[str] = mapped_column(String(48))
+    value: Mapped[float | None] = mapped_column(Float())
+    unit: Mapped[str | None] = mapped_column(String(16))
+    source_device: Mapped[str | None] = mapped_column(String(120))
+    # When Gamira actually put the question to them. Null means the app was
+    # never open to ask, which is a different thing from being ignored.
+    asked_at: Mapped[dt.datetime | None] = mapped_column(UtcDateTime())
+    answered_at: Mapped[dt.datetime | None] = mapped_column(UtcDateTime())
+    escalate_at: Mapped[dt.datetime | None] = mapped_column(UtcDateTime(), index=True)
+    # The conversation the question was asked in, so the answer can be read
+    # back in context rather than taken on trust.
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("conversations.id", ondelete="SET NULL")
+    )
+    alert_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("alerts.id", ondelete="SET NULL")
+    )
+
+    @property
+    def is_open(self) -> bool:
+        return self.status is WellbeingCheckStatus.PENDING
+
+
 class Appointment(UUIDPrimaryKey, Timestamps, Base):
     __tablename__ = "appointments"
 
@@ -302,4 +360,5 @@ __all__ = [
     "NotificationDeliveryAttempt",
     "Reminder",
     "TimelineEvent",
+    "WellbeingCheck",
 ]

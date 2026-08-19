@@ -18,7 +18,13 @@ from app.models.enums import (
     MembershipRole,
     MembershipStatus,
 )
-from app.models.identity import Family, FamilyInvitation, FamilyMembership, User
+from app.models.identity import (
+    Family,
+    FamilyInvitation,
+    FamilyMembership,
+    SeniorProfile,
+    User,
+)
 
 INVITATION_TTL = dt.timedelta(days=7)
 
@@ -92,6 +98,7 @@ async def create_invitation(
     role: MembershipRole,
     email: str | None = None,
     phone: str | None = None,
+    senior_profile_id: uuid.UUID | None = None,
 ) -> tuple[FamilyInvitation, str]:
     """Create an invitation and return it with its one-time raw token.
 
@@ -103,6 +110,7 @@ async def create_invitation(
         family_id=family_id,
         invited_by_user_id=invited_by.id,
         role=role,
+        senior_profile_id=senior_profile_id,
         token_hash=hash_invitation_token(raw_token),
         invited_email=email,
         invited_phone=phone,
@@ -154,6 +162,19 @@ async def accept_invitation(
     else:
         membership.status = MembershipStatus.ACTIVE
         membership.accepted_at = utcnow()
+
+    if invitation.senior_profile_id is not None:
+        senior = await session.get(SeniorProfile, invitation.senior_profile_id)
+        if senior is not None and senior.user_id is None:
+            senior.user_id = user.id
+        elif senior is not None and senior.user_id != user.id:
+            # The profile was linked to someone else between this invitation
+            # being sent and accepted. The membership above still stands; the
+            # link itself is refused rather than silently reassigned.
+            raise Conflict(
+                "This person's profile is already linked to another account.",
+                code="senior_already_linked",
+            )
 
     invitation.status = InvitationStatus.ACCEPTED
     invitation.accepted_at = utcnow()

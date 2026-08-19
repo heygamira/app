@@ -47,7 +47,16 @@ SEED_USERS = [
     # A second cared-for person in the same family, with their own account, so
     # two Parent Apps can run side by side under one Family Dashboard.
     ("sharma-senior-2", "dadiji@example.test", "Sunita Sharma"),
+    # A second family, unrelated to the Sharmas, with its own caregiver and
+    # cared-for person — so multi-family switching and cross-family isolation
+    # are actually exercisable locally rather than the family being an owner
+    # signed in alone.
     ("iyer-owner", "meera.iyer@example.test", "Meera Iyer"),
+    ("iyer-caregiver", "arjun.iyer@example.test", "Arjun Iyer"),
+    ("iyer-senior", "lakshmi.iyer@example.test", "Lakshmi Iyer"),
+    # Belongs to both families, so signing in as this person is the way to
+    # exercise the dashboard's family switcher locally.
+    ("dual-caregiver", "priya.rao@example.test", "Priya Rao"),
 ]
 
 
@@ -74,7 +83,10 @@ async def seed(reset: bool = False) -> None:
         await _create_seed_data(session)
         await session.commit()
 
-    print("Seeded two families (Sharma cares for two people). Sign in with:")
+    print(
+        "Seeded two families (Sharma cares for two people; Priya Rao belongs "
+        "to both, for testing the family switcher). Sign in with:"
+    )
     for subject, email, name in SEED_USERS:
         print(f"  Authorization: Bearer dev:{subject}    ({name}, {email})")
 
@@ -111,8 +123,8 @@ async def _create_seed_data(session: AsyncSession) -> None:
         session,
         name="Iyer family",
         owner=users["iyer-owner"],
-        caregiver=None,
-        senior_user=None,
+        caregiver=users["iyer-caregiver"],
+        senior_user=users["iyer-senior"],
         senior_name="Lakshmi Iyer",
         timezone="Asia/Kolkata",
     )
@@ -132,6 +144,28 @@ async def _create_seed_data(session: AsyncSession) -> None:
         session, family=sharma_family, senior=sunita, medication_name="Metformin"
     )
     await _add_care_data(session, family=iyer[0], senior=iyer[1])
+
+    dual = users["dual-caregiver"]
+    session.add_all(
+        [
+            FamilyMembership(
+                family_id=sharma_family.id,
+                user_id=dual.id,
+                role=MembershipRole.CAREGIVER,
+                status=MembershipStatus.ACTIVE,
+                invited_by_user_id=users["sharma-owner"].id,
+                accepted_at=utcnow(),
+            ),
+            FamilyMembership(
+                family_id=iyer[0].id,
+                user_id=dual.id,
+                role=MembershipRole.CAREGIVER,
+                status=MembershipStatus.ACTIVE,
+                invited_by_user_id=users["iyer-owner"].id,
+                accepted_at=utcnow(),
+            ),
+        ]
+    )
 
     session.add(
         NotificationDelivery(
