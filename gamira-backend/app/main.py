@@ -16,6 +16,7 @@ from app.core.errors import register_exception_handlers
 from app.core.logging import configure_logging, get_logger
 from app.core.middleware import RequestContextMiddleware
 from app.db.session import dispose_engine
+from app.services import realtime
 
 logger = get_logger(__name__)
 
@@ -44,7 +45,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "dev_auth_enabled",
             extra={"detail": "Bearer tokens are not verified. Local use only."},
         )
+    realtime.start_listener(settings)
     yield
+    await realtime.stop_listener()
     await dispose_engine()
 
 

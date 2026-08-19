@@ -192,8 +192,8 @@ async def raise_device_flag(
             "wellbeing_check_id": str(check.id),
         },
     )
-    publish_family_event(
-        senior.family_id, "device_flag_raised", entity_type="notification"
+    await publish_family_event(
+        session, senior.family_id, "device_flag_raised", entity_type="notification"
     )
 
     return DeviceFlagOut(

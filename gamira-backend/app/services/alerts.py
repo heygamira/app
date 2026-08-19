@@ -285,8 +285,12 @@ async def raise_alert(
             "recipients": len(notified),
         },
     )
-    publish_family_event(
-        senior.family_id, "alert_raised", entity_type="alert", entity_id=alert.id
+    await publish_family_event(
+        session,
+        senior.family_id,
+        "alert_raised",
+        entity_type="alert",
+        entity_id=alert.id,
     )
     return alert, notified
 
@@ -587,8 +591,12 @@ async def escalate(
             "recipients": len(notified),
         },
     )
-    publish_family_event(
-        alert.family_id, "alert_escalated", entity_type="alert", entity_id=alert.id
+    await publish_family_event(
+        session,
+        alert.family_id,
+        "alert_escalated",
+        entity_type="alert",
+        entity_id=alert.id,
     )
     return len(notified)
 
