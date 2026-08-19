@@ -6,15 +6,7 @@ import { useSwipeNav } from "@/lib/useSwipeNav";
 import { usePoll } from "@/lib/usePoll";
 import { careStatusFor } from "@/lib/careStatus";
 import { buildFamilySummary } from "@/lib/careSummary";
-import {
-  appointmentsApi,
-  dosesApi,
-  healthApi,
-  medicinesApi,
-  remindersApi,
-  timelineApi,
-  toMember,
-} from "@/api/dashboardData";
+import { dashboardApi, toMember } from "@/api/dashboardData";
 import WelcomeCard from "@/components/gamira/WelcomeCard";
 import QuickActions from "@/components/gamira/QuickActions";
 import FamilySection from "@/components/gamira/FamilySection";
@@ -37,11 +29,18 @@ function withinDays(value, days) {
   return Date.now() - at.getTime() <= days * 24 * 60 * 60 * 1000;
 }
 
+// Routine data has no urgency of its own left to justify polling every few
+// seconds now that an SOS or a device flag arrives over the live event stream
+// (see useAlerts) the instant it happens. A minute-old dose list is a fine
+// trade for turning 6×N requests every 5 seconds into 1 every 60.
+const HOME_POLL_MS = 60_000;
+
 export default function Home() {
   const navigate = useNavigate();
-  const { seniors, selectSenior, activeSeniorId } = useAuth();
+  const { seniors, activeFamily, selectSenior, activeSeniorId } = useAuth();
   const members = useMemo(() => seniors.map(toMember), [seniors]);
   const memberKey = members.map((m) => m.id).join(",");
+  const familyId = activeFamily?.id;
 
   const [doses, setDoses] = useState([]);
   const [readings, setReadings] = useState([]);
@@ -55,19 +54,13 @@ export default function Home() {
   const [dir, setDir] = useState(0);
 
   const load = useCallback(async () => {
-    if (!members.length) {
+    if (!members.length || !familyId) {
       setLoading(false);
       return;
     }
     try {
-      const [d, r, m, e, a, rem] = await Promise.all([
-        dosesApi.listForMembers(members),
-        healthApi.listForMembers(members, { limit: 40 }),
-        medicinesApi.listForMembers(members),
-        timelineApi.listForMembers(members, { limit: 30 }),
-        appointmentsApi.listForMembers(members),
-        remindersApi.listForMembers(members),
-      ]);
+      const { doses: d, readings: r, medicines: m, events: e, appointments: a, reminders: rem } =
+        await dashboardApi.summary(familyId, members);
       setDoses(d);
       setReadings(r);
       setMedicines(m);
@@ -80,17 +73,20 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
-    // members is rebuilt on every render; the ids are what actually change.
+    // members is rebuilt on every render; the ids (via memberKey) and the
+    // family id are what actually change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [memberKey]);
+  }, [memberKey, familyId]);
 
   useEffect(() => {
     load();
   }, [load]);
 
-  // Keeps the screen current while it is open: a dose confirmed in the Parent
-  // App, or a reading from a paired watch, appears without a reload.
-  usePoll(load);
+  // A safety net, not the primary path: an SOS or a device flag now arrives
+  // over the live event stream the instant it happens (see useAlerts), and
+  // this just keeps the routine lists from going stale while the screen sits
+  // open.
+  usePoll(load, HOME_POLL_MS);
 
   const selected = members.find((m) => m.id === activeSeniorId) || members[0] || null;
 

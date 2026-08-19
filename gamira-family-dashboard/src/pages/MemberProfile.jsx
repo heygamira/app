@@ -10,6 +10,7 @@ import {
   Pill,
   StickyNote,
   Trash2,
+  UserPlus,
 } from "lucide-react";
 import { useAuth } from "@/lib/AuthContext";
 import {
@@ -163,6 +164,15 @@ export default function MemberProfile() {
             <Trash2 className="w-4 h-4" /> Archive
           </button>
         </div>
+
+        {!member.user_id && (
+          <Link
+            to={`/invite-member?senior=${id}`}
+            className="flex items-center justify-center gap-1.5 w-full mt-2 py-2.5 rounded-xl border border-dashed border-border text-[12px] font-semibold text-foreground"
+          >
+            <UserPlus className="w-4 h-4" /> Invite {member.name.split(" ")[0]} to sign in
+          </Link>
+        )}
       </div>
 
       <div className="flex gap-2 mt-5 overflow-x-auto no-scrollbar">

@@ -5,10 +5,11 @@ import { useAuth } from "@/lib/AuthContext";
 import { useTheme } from "@/lib/ThemeContext";
 import { notifications as notificationsApi } from "@/api/gamiraClient";
 import { initialOf } from "@/lib/careStatus";
+import FamilySwitcher from "./FamilySwitcher";
 
 export default function TopNav({ title }) {
   const navigate = useNavigate();
-  const { user, isAuthenticated } = useAuth();
+  const { user, isAuthenticated, families } = useAuth();
   const { theme, toggle } = useTheme();
   const [unread, setUnread] = useState(0);
 
@@ -33,11 +34,13 @@ export default function TopNav({ title }) {
       <div className="mx-auto max-w-md flex items-center justify-between px-5 h-16">
         <div className="flex flex-col">
           <span className="text-[19px] font-bold tracking-tight text-foreground">{title || "Gamira"}</span>
-          {!title && (
+          {!title && (families.length > 1 ? (
+            <FamilySwitcher />
+          ) : (
             <span className="text-[10px] font-medium text-muted-foreground -mt-0.5 tracking-wide uppercase">
               Family Dashboard
             </span>
-          )}
+          ))}
         </div>
 
         <div className="flex items-center gap-1.5 -mr-2">

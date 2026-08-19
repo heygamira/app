@@ -95,6 +95,70 @@ async function request(path, { method = 'GET', body, idempotencyKey, signal } = 
 }
 
 // --------------------------------------------------------------------------
+// Live events
+// --------------------------------------------------------------------------
+
+export const events = {
+  /**
+   * A live stream of "something changed for this family" — an async
+   * generator of parsed event objects. Hand-rolled rather than the browser's
+   * native `EventSource`: `EventSource` cannot set an `Authorization` header,
+   * and this is family health data, so the token has to travel the same way
+   * every other request already sends it, not as a URL query parameter that
+   * would end up in a proxy's access log.
+   *
+   * Stops when the caller breaks out of its `for await` loop, or aborts
+   * `signal`. Yields nothing for a heartbeat comment line — those exist only
+   * to keep the connection alive through anything in between.
+   *
+   * @param {string} familyId
+   * @param {{signal?: AbortSignal}} [options]
+   */
+  async *stream(familyId, { signal } = {}) {
+    const token = storage.get();
+    const headers = { Accept: 'text/event-stream' };
+    if (token) headers.Authorization = `Bearer ${token}`;
+
+    const response = await fetch(`${API_BASE}/families/${familyId}/events`, {
+      headers,
+      signal,
+    });
+    if (!response.ok || !response.body) {
+      throw new ApiError({
+        status: response.status,
+        code: 'request_failed',
+        message: `Could not open the event stream (${response.status}).`,
+      });
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) return;
+        buffer += decoder.decode(value, { stream: true });
+        let boundary;
+        while ((boundary = buffer.indexOf('\n\n')) !== -1) {
+          const chunk = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+          const dataLine = chunk.split('\n').find((line) => line.startsWith('data: '));
+          if (!dataLine) continue; // a heartbeat comment, or a blank keep-alive
+          try {
+            yield JSON.parse(dataLine.slice(6));
+          } catch {
+            // A malformed event is not worth breaking the stream over.
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  },
+};
+
+// --------------------------------------------------------------------------
 // Session
 // --------------------------------------------------------------------------
 
@@ -141,6 +205,11 @@ export const families = {
     request(`/families/${familyId}/notes${seniorId ? `?senior_id=${seniorId}` : ''}`),
   createNote: (familyId, body) =>
     request(`/families/${familyId}/notes`, { method: 'POST', body }),
+  /**
+   * Everything the Home screen shows, for every senior in the family, in one
+   * request — replaces what used to be six requests per senior.
+   */
+  dashboardSummary: (familyId) => request(`/families/${familyId}/dashboard-summary`),
 };
 
 export const seniors = {
@@ -281,6 +350,21 @@ export const appointments = {
     request(`/appointments/${appointmentId}`, { method: 'PATCH', body: patch }),
 };
 
+export const devices = {
+  /** The caller's own devices. There is no way to list anyone else's. */
+  list: () => request('/devices'),
+  /**
+   * Register or refresh this installation, and rotate its push token.
+   *
+   * Safe to call on every app start: the same `install_id` updates the
+   * existing row rather than adding another, so one browser has one device
+   * record no matter how many times this runs.
+   */
+  register: (body) => request('/devices', { method: 'POST', body }),
+  /** Stop sending to this device and drop its token. */
+  revoke: (deviceId) => request(`/devices/${deviceId}`, { method: 'DELETE' }),
+};
+
 export const ai = {
   /**
    * Ask a question about one person's record.
@@ -322,6 +406,7 @@ export const gamira = {
   request,
   ai,
   auth,
+  events,
   families,
   seniors,
   medications,
@@ -333,6 +418,7 @@ export const gamira = {
   alerts,
   emergencyContacts,
   appointments,
+  devices,
 };
 
 export default gamira;

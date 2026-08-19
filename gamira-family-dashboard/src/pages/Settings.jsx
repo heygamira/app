@@ -4,6 +4,7 @@ import { Bell, ChevronRight, Globe, Info, LogOut, Moon, Pencil, Smartphone, User
 import { useAuth } from "@/lib/AuthContext";
 import { useTheme } from "@/lib/ThemeContext";
 import { initialOf } from "@/lib/careStatus";
+import { usePushRegistration } from "@/lib/usePushRegistration";
 
 const LANGUAGES = [
   { value: "en", label: "English" },
@@ -16,6 +17,7 @@ export default function Settings() {
   const { user, logout, updateProfile } = useAuth();
   const { theme, toggle } = useTheme();
   const [error, setError] = useState("");
+  const push = usePushRegistration();
 
   // The theme is stored on the user so the Parent App and this dashboard agree.
   const toggleTheme = async () => {
@@ -96,11 +98,17 @@ export default function Settings() {
             <IconBox icon={Bell} />
             <div className="flex-1">
               <p className="text-[14px] font-medium text-foreground">Push notifications</p>
-              <p className="text-[11px] text-muted-foreground mt-0.5">
-                Not connected yet. The backend records what it would send; delivery
-                to phones arrives with Firebase Cloud Messaging.
-              </p>
+              <p className="text-[11px] text-muted-foreground mt-0.5">{pushStatusText(push)}</p>
             </div>
+            {push.supported && push.permission !== "denied" && (
+              <Toggle
+                on={push.permission === "granted" && push.status === "registered"}
+                onClick={() => {
+                  if (push.status !== "registering") push.enable();
+                }}
+                label="Push notifications"
+              />
+            )}
           </div>
         </div>
       </Section>
@@ -121,6 +129,25 @@ export default function Settings() {
       </button>
     </div>
   );
+}
+
+function pushStatusText({ supported, permission, status, error }) {
+  if (!supported) {
+    return "Not available in this browser, or Firebase isn't configured yet.";
+  }
+  if (permission === "denied") {
+    return "Blocked in this browser's site settings. Allow notifications for Gamira there to turn it back on.";
+  }
+  if (status === "registering") {
+    return "Turning on…";
+  }
+  if (status === "error") {
+    return error || "Could not turn on push notifications.";
+  }
+  if (permission === "granted" && status === "registered") {
+    return "On for this device.";
+  }
+  return "Get a phone alert the moment something needs attention.";
 }
 
 function IconBox({ icon: Icon }) {

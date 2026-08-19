@@ -20,6 +20,22 @@ export const METRIC_DISPLAY = {
 export const METRIC_ORDER = Object.keys(METRIC_DISPLAY);
 
 /**
+ * How old a reading a *device* sent may be and still be shown as a number.
+ *
+ * A watch reports continuously, so its last reading means "now" only while it
+ * is still reporting. A reading somebody typed in is not stale — a weight from
+ * last week is still their weight — so this only applies to device sources.
+ */
+export const LIVE_READING_MINUTES = 10;
+
+export function isStale(reading, now = Date.now()) {
+  if (!reading || reading.source !== 'device') return false;
+  const at = new Date(reading.recorded_at).getTime();
+  if (Number.isNaN(at)) return false;
+  return now - at > LIVE_READING_MINUTES * 60_000;
+}
+
+/**
  * Group readings by metric, newest first within each metric.
  *
  * @param {Array<{metric: string, value: number, unit: string, recorded_at: string}>} readings
@@ -86,6 +102,7 @@ export default function HealthOverview({ readings = [], memberName, memberId }) 
                   unit={latest.unit}
                   sparkData={spark}
                   sparkColor={cfg.line}
+                  stale={isStale(latest)}
                 />
               </Link>
             );

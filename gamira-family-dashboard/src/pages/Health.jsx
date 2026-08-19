@@ -6,6 +6,12 @@ import { useAuth } from "@/lib/AuthContext";
 import { useSwipeNav } from "@/lib/useSwipeNav";
 import { usePoll } from "@/lib/usePoll";
 import { healthApi, toMember } from "@/api/dashboardData";
+
+// Slower than the old 5s default now that an SOS or a device flag no longer
+// depends on this poll at all (see useAlerts's live event stream) — this
+// screen's own job is a trend chart, not urgent detection, and 30s of staleness
+// on a reading is not something a family member watching it will notice.
+const HEALTH_POLL_MS = 30_000;
 import EmptyState from "@/components/gamira/EmptyState";
 import MemberSelector from "@/components/gamira/MemberSelector";
 import MemberHealthSection from "@/components/gamira/MemberHealthSection";
@@ -44,7 +50,7 @@ export default function Health() {
 
   // Readings arrive from a paired watch between renders, so this screen keeps
   // reading while it is open.
-  usePoll(load);
+  usePoll(load, HEALTH_POLL_MS);
 
   const selected = members.find((m) => m.id === activeSeniorId) || members[0] || null;
 

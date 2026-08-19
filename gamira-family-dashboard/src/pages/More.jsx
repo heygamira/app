@@ -17,6 +17,7 @@ import {
   Settings,
   ShieldAlert,
   Sparkles,
+  Users,
 } from "lucide-react";
 import { useAuth } from "@/lib/AuthContext";
 
@@ -40,6 +41,7 @@ const MODULES = [
 ];
 
 const ACCOUNT = [
+  { label: "Family access", path: "/family-access", icon: Users },
   { label: "Settings", path: "/settings", icon: Settings },
   { label: "Privacy", path: "/privacy", icon: Lock },
   { label: "Plans", path: "/subscription", icon: CreditCard },

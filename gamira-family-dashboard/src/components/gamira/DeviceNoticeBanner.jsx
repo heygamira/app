@@ -4,12 +4,17 @@ import { Activity, X } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
 /**
- * A reading a paired device flagged, over whatever screen is open.
+ * Something worth a look, over whatever screen is open. Never an emergency.
+ *
+ * Three things arrive here now: a reading a paired device flagged, a flagged
+ * reading nobody answered when Gamira asked about it, and an alert somebody
+ * withdrew because they said they were alright.
  *
  * Amber and dismissible, on purpose. A watch reporting that a number left the
  * range configured on it is not a person pressing SOS, and giving the two the
  * same treatment would teach a family to ignore both. The wording keeps the
- * judgement with the device: Gamira never says a reading is bad.
+ * judgement with whoever made it: Gamira never says a reading is bad, and the
+ * "nobody answered" notice reports the silence rather than diagnosing it.
  */
 export default function DeviceNoticeBanner({ notices = [], onAcknowledge }) {
   const navigate = useNavigate();
@@ -34,7 +39,14 @@ export default function DeviceNoticeBanner({ notices = [], onAcknowledge }) {
             <button
               onClick={() => {
                 onAcknowledge?.(notice.id);
-                navigate("/health");
+                // Where the explanation actually is. A cancelled alert is not
+                // on the health screen, and sending somebody there to look for
+                // it would be a small lie about where their information lives.
+                navigate(
+                  notice.related_entity_type === "health_reading"
+                    ? "/health"
+                    : "/notifications"
+                );
               }}
               className="min-w-0 flex-1 text-left"
             >
@@ -46,7 +58,7 @@ export default function DeviceNoticeBanner({ notices = [], onAcknowledge }) {
               </p>
               {notices.length > 1 && (
                 <p className="mt-1 text-[11px] font-semibold text-warning">
-                  {notices.length - 1} more flagged reading
+                  {notices.length - 1} more notice
                   {notices.length > 2 ? "s" : ""}
                 </p>
               )}

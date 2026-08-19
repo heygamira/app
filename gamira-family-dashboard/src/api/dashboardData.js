@@ -37,6 +37,7 @@ export function toMember(senior) {
   return {
     id: senior.id,
     family_id: senior.family_id,
+    user_id: senior.user_id || null,
     name: senior.preferred_name,
     role: senior.relationship_label || '',
     photo_url: senior.avatar_url || '',
@@ -392,4 +393,55 @@ export const appointmentsApi = {
 export const notesApi = {
   list: (familyId, memberId) => families.notes(familyId, memberId),
   create: (familyId, body) => families.createNote(familyId, body),
+};
+
+// --------------------------------------------------------------------------
+// The Home screen's whole load, in one request
+// --------------------------------------------------------------------------
+
+export const dashboardApi = {
+  /**
+   * Everything Home.jsx shows, for every member, in one request — replaces
+   * the six `...ForMembers` calls above, which cost 6×N requests per poll
+   * tick for N members shown. Not a drop-in for every screen: this is sized
+   * to Home.jsx's own needs (e.g. 40 readings, 30 timeline entries, shared
+   * across the whole family), not to Health.jsx's deeper per-member history,
+   * which still uses `healthApi.listForMembers` above.
+   *
+   * @param {string} familyId
+   * @param {object[]} members - from `membersApi.list`, for the name lookup
+   */
+  summary: async (familyId, members) => {
+    const data = await families.dashboardSummary(familyId);
+    const nameFor = (seniorId) =>
+      members.find((member) => member.id === seniorId)?.name || '';
+    const tag = (row) => ({
+      ...row,
+      family_member_id: row.senior_profile_id,
+      family_member_name: nameFor(row.senior_profile_id),
+    });
+
+    return {
+      doses: data.doses.map(tag),
+      readings: data.health_readings
+        .map((row) => toReading(row, nameFor(row.senior_profile_id)))
+        .sort(
+          (a, b) => new Date(b.recorded_at).getTime() - new Date(a.recorded_at).getTime()
+        ),
+      medicines: data.medications.map((row) =>
+        toMedicine(row, nameFor(row.senior_profile_id))
+      ),
+      events: data.timeline
+        .map((row) => toTimelineEvent(row, nameFor(row.senior_profile_id)))
+        .sort(
+          (a, b) => new Date(b.created_date).getTime() - new Date(a.created_date).getTime()
+        ),
+      appointments: data.appointments
+        .map(tag)
+        .sort((a, b) => new Date(a.starts_at).getTime() - new Date(b.starts_at).getTime()),
+      reminders: data.reminders.map((row) =>
+        toReminder(row, nameFor(row.senior_profile_id))
+      ),
+    };
+  },
 };
