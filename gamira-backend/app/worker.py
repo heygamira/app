@@ -3,9 +3,16 @@
     python -m app.worker
 
 Same codebase, same models, same services as the API — a different entry point,
-not a different application. It holds no HTTP server and answers no request; if
-it stops, the API keeps serving reads and writes, and the work it was doing is
-picked up by the next worker when its leases expire.
+not a different application. It answers no real request; if it stops, the API
+keeps serving reads and writes, and the work it was doing is picked up by the
+next worker when its leases expire.
+
+It does bind a bare TCP listener on $PORT when one is set (Cloud Run always
+sets one). Cloud Run Services require every container to accept connections
+on that port to be considered healthy, worker or not — this holds the socket
+open and does nothing else with it, which is enough for a TCP-only probe and
+costs nothing at rest. Skipped entirely when $PORT is unset (plain local runs,
+--once), so nothing changes for those.
 
 Options:
     --once            run every ready job, then exit (useful in CI and cron)
@@ -18,6 +25,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import os
 import signal
 import sys
 
@@ -27,6 +35,24 @@ from app.db.session import dispose_engine, get_sessionmaker
 from app.jobs.runner import Worker
 
 logger = get_logger("app.worker")
+
+
+async def _handle_probe_connection(
+    _reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+) -> None:
+    # A TCP probe only needs the connection to open; nothing here has to read
+    # or write anything for that to succeed.
+    with contextlib.suppress(OSError):
+        writer.close()
+
+
+async def _serve_health_probe() -> asyncio.AbstractServer | None:
+    port = os.environ.get("PORT")
+    if not port:
+        return None
+    server = await asyncio.start_server(_handle_probe_connection, "0.0.0.0", int(port))
+    logger.info("worker_health_probe_listening", extra={"port": port})
+    return server
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -62,15 +88,19 @@ async def _run(args: argparse.Namespace) -> int:
     worker = Worker(
         get_sessionmaker(), settings=settings, worker_id=args.worker_id
     )
+    probe_server: asyncio.AbstractServer | None = None
     try:
         if args.once:
             processed = await worker.run_once()
             logger.info("worker_run_once_complete", extra={"processed": processed})
             return 0
+        probe_server = await _serve_health_probe()
         _install_signal_handlers(worker)
         await worker.run()
         return 0
     finally:
+        if probe_server is not None:
+            probe_server.close()
         await dispose_engine()
 
 
