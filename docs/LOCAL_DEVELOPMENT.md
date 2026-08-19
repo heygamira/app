@@ -186,9 +186,30 @@ $env:TEST_POSTGRES_URL = 'postgresql+asyncpg://gamira:gamira@localhost:5432/gami
 python -m pytest tests/test_jobs_postgres.py
 ```
 
+No Docker, no problem — a native install works identically and is lighter on
+a machine that struggles under several containers at once:
+
+```powershell
+winget install PostgreSQL.PostgreSQL.17
+# then, as an admin, create the gamira role/db and gamira_test the same way
+# docker-compose.yml does (see its credentials); native install has no
+# built-in equivalent of compose's healthcheck-gated startup, so just wait
+# for the "postgresql-x64-17" service to report Running.
+```
+
 On a machine with no PostgreSQL,
 `test_jobs.py::test_the_production_claim_really_uses_skip_locked` compiles the
 same statement against the PostgreSQL dialect and asserts the clause is in it.
+
+Verified against both a native install and real concurrent workers, 2026-08-19
+— including a real bug the PostgreSQL-only tests caught that SQLite could
+not: `uq_background_jobs_dedupe_live` and `uq_family_memberships_family_user_live`
+are partial unique indexes written against the enum's lowercase `.value`
+(`status IN ('queued', 'running')`, `status <> 'revoked'`), but
+`Enum(..., native_enum=False)` with no `values_callable` stores a Python
+enum's *name* — the actual column held `'QUEUED'`, `'REVOKED'`. Neither
+predicate ever matched a row, on either dialect, so neither index ever
+rejected a duplicate live row. Fixed in migration `0013`.
 
 ## The voice end-to-end demonstration
 
@@ -416,12 +437,36 @@ After `python -m app.db.seed`, these identities exist:
 | `dev:sharma-senior` | Vikram Sharma, a cared-for person |
 | `dev:sharma-senior-2` | Sunita Sharma, the second cared-for person |
 | `dev:iyer-owner` | Meera Iyer, an unrelated family |
+| `dev:iyer-caregiver` | Arjun Iyer, caregiver in the Iyer family |
+| `dev:iyer-senior` | Lakshmi Iyer, cared-for person in the Iyer family |
+| `dev:dual-caregiver` | Priya Rao, belongs to both families — the one to sign in as to see the family switcher |
 
 Both apps offer these on their sign-in screen, and both accept
 `?dev=<subject>` in the URL during development, which is how `run.py` gives
-each window its own identity. Once a Firebase project exists,
-set `AUTH_MODE=firebase` and `FIREBASE_PROJECT_ID`; the backend already verifies
-real ID tokens against Google's rotating signing keys.
+each window its own identity.
+
+### Testing real Firebase sign-in locally
+
+`run.py` always starts the backend with `AUTH_MODE=dev`, since its multi-window
+testing depends on the `?dev=<subject>` shortcut — that does not change. To
+test real Google/email sign-in instead, run the backend by hand with
+`AUTH_MODE=firebase` and a real `FIREBASE_PROJECT_ID`, and set the
+`VITE_FIREBASE_*` vars in each app's env file (`.env.local` for the dashboard,
+`.env` for the Parent App — see each app's `.env.example`) to the web config
+from Firebase console > Project settings > Your apps > Web app. Both are safe
+to run side by side; the dev-identity dropdown still works whenever the
+backend happens to be in `AUTH_MODE=dev`, and is refused otherwise.
+
+```powershell
+$env:AUTH_MODE = 'firebase'; $env:FIREBASE_PROJECT_ID = 'your-project-id'
+uvicorn app.main:app --reload --port 8010
+```
+
+Verified 2026-08-19: a real Firebase ID token from a freshly-registered
+email/password account was verified by the backend's `FirebaseVerifier`
+against Google's live signing keys, and correctly landed a brand-new user in
+the dashboard's onboarding screen and the Parent App's "link your account"
+screen — the same place a `dev:` identity with no family/senior link would.
 
 ## Frontend data access
 

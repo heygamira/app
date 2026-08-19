@@ -6,7 +6,7 @@ Public website                    Gemini Live
 Parent App ───────┐                     │
                   ├── Gamira FastAPI ── PostgreSQL
 Family Dashboard ┘
-Today, SQLite can substitute for PostgreSQL locally. Firebase, push notifications, cloud deployment, billing, reliable SOS delivery, and production AI are still future work.
+Today, SQLite substitutes for PostgreSQL for day-to-day local speed; PostgreSQL itself now runs locally too and is verified (see below). Real Firebase Authentication (Google and email/password) now works locally in both apps, alongside the dev-identity shortcut. Push notifications, cloud deployment, billing, reliable SOS delivery, and production AI are still future work.
 What is built
 1. Gamira backend
 The backend is a Python/FastAPI modular monolith with one authoritative database. It exposes roughly 40 API operations covering:
@@ -27,8 +27,8 @@ Notification records
 The current database has 16 models across identity, medication, care, notifications, and auditing. See [the backend models (line 36)](Z:/Gamira/gamira-backend/app/models/identity.py:36) and [API contract (line 1)](Z:/Gamira/docs/API.md:1).
 Important backend behavior:
 Every request uses a bearer token.
-Firebase token verification is implemented, but no real Firebase project is configured.
-Local development uses clearly restricted dev: identities.
+Firebase token verification is implemented and now verified end to end against a real Firebase project.
+Local development uses clearly restricted dev: identities, alongside real Firebase sign-in.
 Server-side roles are owner, caregiver, family, doctor, and viewer.
 Owners, caregivers, and family roles can modify care data.
 Doctors and viewers are read-only.
@@ -235,7 +235,7 @@ Family Dashboard: lint, type check, and production build passing
 Parent App: lint, type check, and production build passing
 Website: lint, type check, production build, SSR, and nine-route prerender passing
 Important limitations:
-Docker is not installed here, so PostgreSQL behavior has not been verified on this machine; backend tests use SQLite.
+PostgreSQL now runs locally (native install, not Docker) and is verified — migrations, the concurrent-claim locking path, and a real bug in two partial unique indexes that never actually fired on either dialect, now fixed. Backend tests still run against SQLite by default for speed.
 There are no frontend automated tests or CI/deployment pipelines.
 Both app production bundles are large and need code-splitting.
 A machine-level DEBUG=release variable currently breaks backend settings unless overridden with a valid boolean.

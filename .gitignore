@@ -58,3 +58,6 @@ coverage/
 htmlcov/
 .coverage
 .coverage.*
+
+# Every run writes its console output here, kept for the last few runs.
+logs/

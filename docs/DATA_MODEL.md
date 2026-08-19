@@ -18,6 +18,7 @@ difference is stated. `alembic/versions/` is authoritative:
 | `0006` | `live_sessions.provisional` |
 | `0007` | `senior_memories` |
 | `0008` | `reminders.suggestion_reason`, `reminders.suggested_from_conversation_id` |
+| `0009` | `wellbeing_checks` |
 
 ## Common conventions
 

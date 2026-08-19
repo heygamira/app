@@ -50,24 +50,21 @@ window. See [`docs/LOCAL_DEVELOPMENT.md`](docs/LOCAL_DEVELOPMENT.md).
 
 ## Next
 
-- [ ] **Configure Firebase** and switch `AUTH_MODE` from `dev` to `firebase`.
-      Still the largest single gap: nothing is really authenticated yet.
-- [ ] **Create FCM credentials** and set `FCM_PROVIDER=firebase`. The whole
-      delivery path — retries, invalid-token revocation, per-device attempts —
-      is built and tested against a fake, but no push has reached a real device.
-- [ ] **Register for push in the apps.** Needs a service worker in the Parent
-      App; `POST /devices` is waiting for it. Until then every notification
-      still only reaches somebody whose app is open.
-- [ ] **Verify against PostgreSQL.** Docker is not installed on this machine, so
-      the production locking path has never run against a server. The tests
-      exist and skip; see "Known issues" below.
+- [ ] **Create real FCM credentials** and set `FCM_PROVIDER=firebase`,
+      `FCM_CREDENTIALS_FILE`, `FCM_PROJECT_ID` in `.env`. The delivery path,
+      both apps' registration flow, and the config plumbing are all built and
+      tested against a fake — but no push has reached a real device, because
+      nobody has generated a service-account key or a Web Push (VAPID)
+      certificate for the Firebase project yet. That has to happen in the
+      Firebase console; nothing local can substitute for it.
 - [ ] Nothing stops two emergency contacts both being `is_primary`. Either
       enforce one per person or drop the flag for an explicit order.
 - [ ] Add authenticated file storage, then restore photo upload in both apps.
 - [ ] Show the weekly care summary in the Family Dashboard. The backend
       produces it, with its figures and its provenance; no screen reads it yet.
-- [ ] Conversation retention: `retention_policy` is recorded on every
-      conversation, but no deletion job runs.
+- [ ] Wake-word recall is 0.674 and the false-positive target is not met
+      (`public/wake/manifest.json`). The detector now *runs* — on launch, on
+      every screen — but none of that makes it hear better.
 - [ ] An AI evaluation set, before changing models or prompts. The safety rules
       are tested; the *quality* of the wording is not.
 - [ ] Connect the website's Get Started and support flows.
@@ -164,25 +161,6 @@ for that reason; if it moves, minting fails loudly and the console shows why.
 
 ## Known issues found during the migration
 
-- **PostgreSQL is unverified.** Docker is not installed on this machine, so
-  every migration and every test has only run against SQLite. The five tests in
-  `tests/test_jobs_postgres.py` exercise the production locking path and skip
-  without a server. To close this:
-
-  ```powershell
-  docker compose up -d postgres
-  cd Z:\Gamira\Gamira-App\gamira-backend
-  $env:DATABASE_URL = 'postgresql+asyncpg://gamira:gamira@localhost:5432/gamira'
-  python -m alembic upgrade head
-  $env:TEST_POSTGRES_URL = 'postgresql+asyncpg://gamira:gamira@localhost:5432/gamira_test'
-  python -m pytest tests/test_jobs_postgres.py -v
-  ```
-
-  Two things specifically need a real server: the partial unique index on
-  `background_jobs.dedupe_key`, and `SELECT ... FOR UPDATE SKIP LOCKED` under
-  concurrent workers. In the meantime,
-  `test_jobs.py::test_the_production_claim_really_uses_skip_locked` compiles the
-  statement against the PostgreSQL dialect and asserts the clause survives.
 - The duplicate-content files in the first dashboard export (`Privacy.jsx`,
   `EmptyState.jsx`, `FamilyMemberCard.jsx` each held another component's
   source) were fixed in the second export. Other exports may carry the same
@@ -483,6 +461,353 @@ without bound; error messages printed as `['...']`; `tools/e2e_voice_demo.py` an
       the real answer if this ever needs to be driven from a phone.
 - [ ] The shutdown sheet's checklist is paced to match what the runner does, not
       driven by it. Real progress would need the runner to report each step.
+
+## Done, 2026-08-18 — proactive, voice-first, and visible
+
+The theme: the app stopped being something you operate.
+
+- [x] **Voice is app-wide.** `lib/VoiceContext.jsx` is a layout route wrapping
+      every signed-in screen. The session, the wake-word detector and the
+      confirmation dialog used to live inside `pages/Home.jsx`, so navigating
+      anywhere tore down the microphone — an app meant to be run by voice had
+      voice on one screen out of six.
+- [x] **It listens on launch.** The wake word arms on mount when microphone
+      permission is already held (Chrome's autoplay policy exempts exactly that
+      case), falling back to the first gesture on a first visit. The old "arm on
+      the first tap anywhere" rule looked right and was not: the first tap it
+      could see was almost always the microphone button, and that same tap
+      starts a session, which *pauses* the detector for its whole duration.
+- [x] **The SOS countdown is real, on both paths.** `autoConfirmSeconds`
+      defaulted to 0 and nothing ever passed a value, so the voice-opened SOS
+      fired on the next tick with no countdown and no cancel window — while the
+      tool description told the model a cancellable countdown was running.
+- [x] **"Cancel" works out loud**, before and after it has gone. Before, it is a
+      client tool closing a dialog. After, `cancel_my_sos` withdraws it with a
+      spoken confirmation, keeps the row, and tells the family it was cancelled.
+      The one narrow exception to "the assistant cannot end an alert", written
+      up in full in `docs/AI_SAFETY.md`.
+- [x] **A flagged reading gets asked about.** `wellbeing_checks` (migration
+      `0009`) makes the flag durable, Gamira asks, and
+      `JobType.WELLBEING_CHECK_ESCALATE` tells the family if nobody answers —
+      as `AlertType.WELLBEING_CHECK`, amber, never the red SOS treatment.
+      The model reports the answer; a rule about elapsed time decides.
+- [x] **The background TTS is gone.** Both `speechSynthesis` call sites removed.
+      Gamira speaks first through the Live API instead, with the microphone shut
+      until she has finished her sentence and a 20-second window after it.
+- [x] **The transcript shows both sides.** The person's own words were being
+      transcribed and handed to nobody. New `VoiceTranscript` panel, and a
+      microphone button with five distinguishable states — grey and still when
+      nothing is listening, which is a thing it could never say before.
+- [x] **The "Taken" button lives on its row**, inside the card for the medicine
+      it records, instead of a full-width bar underneath that read as a page
+      action belonging to nothing.
+- [x] **The console has a "Gamira's mind" tab.** Decisions, observations,
+      memories, suggestions, notices, usage and wellbeing checks, straight from
+      the rows the backend writes. Nine log lines existed in `app/ai/` and eight
+      of them were failures; a *successful* tool call logged nothing at all.
+
+## Done, 2026-08-18 — the repair pass
+
+Found by running it rather than by testing it, which is the point of the list.
+
+- [x] **`wellbeing_checks` could not be written to at all.** Migration `0009`
+      declared `created_at`/`updated_at` NOT NULL with no `server_default`,
+      while `Timestamps` supplies only a server default — so SQLAlchemy left
+      them out of the INSERT and every watch flag died on NOT NULL. The whole
+      feature had never run outside the tests, which build the schema from the
+      models. `test_migrations.py` now compares the migrated database to the
+      models **column by column**, and was checked by reintroducing the bug.
+- [x] **One-off reminders.** "Remind me in five minutes" works, the backend does
+      the clock arithmetic in the person's timezone, and the reminder
+      **completes after it fires** — without which a five-minute timer became a
+      permanent daily alarm.
+- [x] **The SOS countdown reset forever and the dialog would not close.** Two
+      inline arrow props gave `begin` and `confirm` a new identity on every
+      parent render; the open effect re-fired and the tick timer restarted.
+      Home re-renders several times a second while Gamira speaks, which is
+      exactly when the dialog is up. Callbacks live in refs now, the open effect
+      keys on the signal's *value*, and the countdown is 5 seconds.
+- [x] **She says the countdown out loud.** The brief was `briefInto(...) ||
+      talk(...)`, and `talk` is async — the `||` tested a promise, so the
+      fallback never ran and with no session open she said nothing.
+- [x] **The alert that would not close.** Every press and escalation writes its
+      own notification; dismissing one revealed the next. Acknowledging now
+      clears them all, and an acknowledged alert counts as closed.
+- [x] **The transcript.** Reads `interimInputTranscription`, which nothing did —
+      so the person's own words could only appear after they stopped talking,
+      by which time Gamira had overwritten them. One sentence at a time in a
+      fixed-height slot, hers in the accent purple, theirs held for 1.4s so they
+      can be read. Nothing below it moves.
+- [x] **Proactive nudges marked themselves "already said" before speaking**, so
+      one failed session silently burned that dose for the day. Plus a UTC date
+      key and a browser-clock comparison, both now the person's own timezone.
+- [x] **Speculative voice sessions.** Each guess mints a real Google token; each
+      abandoned one also queued a review of an empty conversation, and the only
+      limit was a constant in the browser. Guard added, server-side hourly cap
+      added, pre-connect threshold 0.40 → 0.75.
+- [x] **Shutdown.** `pump()` called `stop_all()` from a daemon thread — the same
+      bug fixed for the console path and left on the path taken when a dev
+      server dies. And browser windows reopened from the Control tab survived
+      every shutdown, because their launcher process exits immediately; they are
+      closed by profile now.
+- [x] **sysmon walked the whole process table once per tracked pid per sample** —
+      120 full walks a minute from the tool that exists to notice things making
+      the machine slow. One snapshot per sample.
+- [x] **The console.** Decision rows lead with the sentence and keep the fields
+      as detail; they are violet rather than a third amber. Conversation and
+      Gamira's mind can be scrolled — they were bare divs in a flex column and
+      no input could reach them.
+
+## Done, 2026-08-18 — the second pass, from a screen recording
+
+Everything here was found by using it, and several of them are the same bug
+reported twice because the first fix never reached a running database.
+
+- [x] **The watch flag still failed.** `0009` was corrected in place, which
+      fixes a database built from scratch and does nothing for one that has
+      already run it — Alembic does not re-run an applied revision. `0010`
+      rebuilds the table with the defaults. The first version of it dropped all
+      five indexes on the way through, because batch mode keeps only what
+      `copy_from` was told about; `test_migrations.py` now asserts every model
+      index survives every migration, and that test was checked by removing
+      them again.
+- [x] **"I feel unwell" now reaches the family.** New `tell_family` tool: a
+      `family_update` notification and a timeline entry, never an alert, never
+      urgent, and confirmed first when the idea was hers. Between an emergency
+      and silence there was nothing at all, so the commonest thing anybody
+      would want their family to know either became an SOS or waited for the
+      after-call review — which only sends anything if the model happened to
+      say it would.
+- [x] **The person's own words were concatenated with themselves.** The
+      interim transcript replaced, the finalised one *appended*, and both carry
+      the same sentence — so their line read "I have a headacheI have a
+      headache". Both replace now; the finalised one closes the utterance so
+      the next thing they say starts a new line.
+- [x] **The captions raced four sentences ahead of her voice.** The transcript
+      is generated text and arrives as fast as the model can produce it, so a
+      whole reply is on screen while she is still saying the first sentence of
+      it. Arrival time says nothing about speech and is no longer used:
+      sentences queue and are released at a speaking pace, and the queue
+      shortens its own holds when it falls behind. `npm run caption:check`
+      covers the splitting and the pacing, including the two it got wrong
+      first: a full stop at the very end of the stream is not a boundary yet,
+      and "Dr. Fictional" is not two sentences.
+- [x] **Their line stayed too long, hers was anonymous, nothing ever cleared.**
+      One second for theirs, a blue-to-violet gradient for hers — the
+      microphone's own colours — and the slot empties five seconds after the
+      last thing said.
+- [x] **"Bye" cut her off mid-goodbye.** She calls `end_conversation` in the
+      same turn as "talk to you later", and the audio for that sentence is
+      already scheduled in the playback graph, which `stop()` tears down.
+      `finish()` stops listening at once and closes when the sentence has
+      actually been said, with a 12-second backstop.
+- [x] **The "your family knows" dialog stayed open after the alert was
+      withdrawn by voice.** Nothing told the screen: only confirmations came
+      back to the app. Backend tool results are reported by name now, so
+      `cancel_my_sos` closes it — and "Cancelled" closes itself after a few
+      seconds rather than waiting to be dismissed.
+- [x] **The reminder nudge was three times the size of the row it was about**,
+      and it asked *whether to set a reminder* for the thing it was in the
+      middle of reminding them about. It is now the same shape as a schedule
+      row, with Taken or Done; the brief tells her to deliver the reminder, not
+      offer one; and the card goes when the conversation it opened ends, or
+      when what it is about is recorded, wherever that happened.
+- [x] **A missed dose was never mentioned.** The nudge list stopped at `late`,
+      and a dose becomes `missed` on a timer — so the doses most worth a word
+      were the only ones she never said anything about.
+- [x] **A watch that is not running no longer shows numbers.** A reading a
+      *device* sent is only "now" while the device is still sending; after ten
+      minutes both apps show a dash and "not reporting". A reading somebody
+      typed in is never stale — a weight from last week is still their weight.
+- [x] **Only the console opens at start-up.** The new **Apps** tab opens each
+      window when it is wanted and closes it again, one at a time or all at
+      once. `--open-all` restores the old behaviour. Four Chrome instances
+      before anybody has asked for one was most of the load on the machine.
+- [x] **Every line is written to `logs/run-<timestamp>.log`**, as it happens,
+      and the last twenty runs are kept. The ring buffer holds a few thousand
+      lines, which is the wrong amount when the interesting thing happened
+      twenty minutes and one dependency re-scan ago.
+- [x] **A rejected device flag was retried every tick.** `entered` is false by
+      then and `stale` compares against a timestamp that was never set, so one
+      failing endpoint became a request every few seconds, each one a full
+      traceback in the console — hammering a server that is already failing.
+
+### Still the biggest cost, now at least under control
+
+Four browser windows are four *separate* Chrome instances, each with its own
+profile — 20–30 processes — plus two Vite servers, a reloading uvicorn, and a
+wake-word model doing up to 12.5 WASM inferences a second in the Parent App
+window. `--parents 2 --watches 2` makes it six windows.
+
+Nothing inside Gamira makes a Chrome instance cheap, so the change is to stop
+opening ones nobody asked for: start-up opens the console alone, and the Apps
+tab opens and closes the rest on demand. Two windows instead of four is roughly
+half of it, and closing the parent app window is the only way to stop the
+wake-word model entirely.
+
+## Done, 2026-08-19 — a family can actually be more than one family, real sign-in, a verified database
+
+### Multi-family selection, linking and onboarding
+
+- [x] **The dashboard mixed every family's cared-for people together.**
+      `AuthContext.jsx` hardcoded `activeFamily: families[0]`, and `/me`
+      returns every senior across every family a user belongs to in one flat
+      list — so a caregiver in two families saw both families' people in one
+      grid, with no way to tell them apart or switch. `activeFamilyId` is now
+      real state (same pattern as the existing senior selector), and `seniors`
+      is narrowed to the active family before anything else reads it — every
+      existing screen got this fix for free, since none of them read `/me`'s
+      raw list directly.
+- [x] A family switcher in the header, shown whenever a signed-in user
+      belongs to more than one family.
+- [x] **Invitations, `/family-access` and `/invite-member`.** The backend
+      always supported creating and accepting invitations
+      (`POST /families/{id}/invitations`, `POST /invitations/{token}/accept`);
+      nothing in either frontend ever called it. Both routes now exist, plus
+      an accept-invite screen at `/invite/:token` that works whether the
+      person is already signed in or arrives signed out (the redirect back to
+      login now preserves the link instead of dropping it).
+- [x] **A senior's own sign-in could never actually be linked to their
+      `SeniorProfile`.** The column (`user_id`) existed; nothing set it
+      outside seed data, and invitations had no way to say "this one is for
+      senior X." Invitations can now carry `senior_profile_id` (migration
+      `0012`); accepting one sets the link and forces a viewer role,
+      server-side, regardless of what role was requested.
+- [x] **The Parent App silently showed the wrong person.** An unlinked
+      caregiver fell back to `seniors[0]` — whichever cared-for person the
+      family added first — with nothing indicating the record wasn't theirs.
+      It now shows an explicit "link your account" screen instead.
+- [x] Onboarding for a signed-in user with zero families: create a family,
+      then add the first cared-for person, instead of the app having no
+      defined behaviour for that state.
+- [x] Dev seed data gained a second family with real members
+      (`iyer-caregiver`, `iyer-senior`) and a caregiver in both families
+      (`dual-caregiver`), so multi-family switching is actually exercisable
+      locally instead of two families each with one lonely owner.
+
+### Real Firebase Authentication
+
+- [x] Google and email/password sign-in in both apps
+      (`lib/firebase.js`, `lib/useFirebaseAuth.js`), alongside — not instead
+      of — the `dev:` identity dropdown `run.py`'s multi-window testing
+      depends on. `AUTH_MODE=dev` and `AUTH_MODE=firebase` are both real,
+      separately-runnable local configurations now, not one theoretical one.
+      Verified end to end: a real Firebase ID token, verified by the
+      backend's `FirebaseVerifier` against Google's live signing keys, landed
+      a fresh user in the new onboarding screen (dashboard) and the new
+      "link your account" screen (Parent App), exactly as designed.
+- [x] A Firebase ID token expires hourly; `onIdTokenChanged` keeps the stored
+      bearer token current for a long-open tab, without touching
+      `isLoadingAuth` — see the `refreshSession` fix below for why that
+      distinction turned out to matter.
+- [x] **`refreshSession` vs `checkUserAuth`.** The accept-invite screen's own
+      mount effect called `checkUserAuth()` to pick up the newly joined
+      family — but that screen sits behind `ProtectedRoute`, which renders
+      its loading fallback (not the route) while `isLoadingAuth` is true, and
+      `checkUserAuth` sets that flag. The screen unmounted itself mid-flight,
+      remounted once loading cleared, and its mount effect fired again —
+      calling accept a second time on an already-used token, in a loop.
+      Caught by driving the actual flow in a real browser, not by lint or the
+      test suite. `refreshSession` re-fetches `/me` without the flag; the
+      invitation-accept call itself is additionally memoized by token so a
+      second effect firing, from any cause, replays the same request instead
+      of a new one.
+
+### PostgreSQL, verified — and a real bug it found
+
+Docker was never installed here; PostgreSQL 17 is now, natively (`winget`),
+running as a Windows service — lighter than Docker Desktop on a machine with
+a documented crash history under heavy multi-process load. Every migration
+(`0001`–`0013`) now applies cleanly to a real server, and all six tests in
+`tests/test_jobs_postgres.py` pass (five existing, one added).
+
+- [x] **`uq_background_jobs_dedupe_live` and `uq_family_memberships_family_user_live`
+      never actually fired, on either database.** Both are partial unique
+      indexes written as raw SQL predicates against the enum's lowercase
+      `.value` (`status IN ('queued', 'running')`, `status <> 'revoked'`).
+      `Enum(..., native_enum=False)` with no `values_callable` stores a
+      Python enum's *name*, not its value — confirmed directly against
+      PostgreSQL: every row's `status` column held `'QUEUED'`, `'REVOKED'`,
+      not the lowercase form. The predicates matched nothing, ever, so
+      neither partial index ever rejected a second live row. The only thing
+      standing between two concurrent requests and a duplicate live job, or a
+      duplicate live membership, was the application-level check — which is
+      real, but was meant to be a fast path in front of a database guarantee,
+      not the only guarantee. Fixed in both the models and migration `0013`
+      (uppercase predicates, matching what the column actually stores); a new
+      test inserts two live memberships directly, bypassing the service
+      layer, the same way the existing job-dedupe test already did.
+      SQLite never caught this because no equivalent direct-insert test
+      exists for it — worth writing one, since the same defect is just as
+      possible there.
+- [x] Confirmed manually too: API and worker started against the real
+      server, a medication created through the API, dose events correctly
+      materialized by the worker — every scheduled job type ran clean.
+
+### Still owed from this pass
+
+- [ ] Register FCM push (`FCM_PROVIDER=firebase`) is still separate — real
+      auth does not imply real push credentials exist.
+- [x] SQLite regression tests for both partial indexes, mirroring the
+      PostgreSQL ones: `test_jobs.py`'s `test_the_partial_index_rejects_two_live_rows_directly`
+      (background jobs) and `test_authorization.py`'s
+      `test_the_membership_partial_index_rejects_two_live_rows_directly`
+      (family memberships).
+- [ ] `gamira-backend/.env`'s `DATABASE_URL` stays on SQLite by default for
+      day-to-day speed; switching local dev over to Postgres permanently
+      wasn't asked for and wasn't done.
+
+## Done, 2026-08-19 — both apps register for push, and neither had a test suite
+
+### Web push registration
+
+- [x] Both apps request notification permission, register
+      `public/firebase-messaging-sw.js`, get an FCM token, and call
+      `POST /devices` — behind an explicit Settings toggle, never an
+      automatic prompt on login. Off by default, silently re-registers on
+      every load once permission is already granted (the backend's own
+      `POST /devices` docstring: "safe to call on every app start").
+      `src/lib/usePushRegistration.js` in both apps; wired into the Family
+      Dashboard's existing `Settings.jsx` placeholder row and a new
+      `/settings/notifications` page in the Parent App, matching each app's
+      own settings pattern.
+- [x] Foreground messages refresh the screen through each app's existing
+      live-update path (`useAlerts`'s `reload` in the dashboard, `useVoice`'s
+      `reload` in the Parent App) instead of inventing new UI; background
+      messages show a real OS notification and route on click.
+- [x] The Parent App's `gamiraClient.js` already had an unused `devices`
+      client (`list`/`register`/`revoke`) — wired up rather than duplicated.
+      The Family Dashboard had none; added to match.
+- [x] `gamira-backend/.env.example` gained the `FCM_*` block
+      (`FCM_PROVIDER`, `FCM_CREDENTIALS_FILE`, `FCM_PROJECT_ID`,
+      `FCM_TIMEOUT_SECONDS`) — no backend code changed, since
+      `get_push_provider()` already switches on `FCM_PROVIDER` alone.
+- [ ] **Still not real delivery.** `FCM_PROVIDER` stays `fake` until someone
+      generates an actual service-account key and VAPID certificate in the
+      Firebase console and points `.env` at them — see "Next" above. Until
+      then registration completes and a `RegisteredDevice` row is stored,
+      but nothing is ever actually sent.
+
+### Frontend tests, from zero
+
+- [x] Vitest + React Testing Library in both apps (`npm run test`) — neither
+      had any test framework, config, or test file before this. 37 tests
+      total: `gamiraClient.js`'s auth/error handling in both apps; the
+      Family Dashboard's `AuthContext` family-narrowing and `FamilySwitcher`
+      visibility (direct regression coverage for the `activeFamily:
+      families[0]` bug fixed above); the Parent App's `RequireLinkedSenior`
+      (regression coverage for the `seniors[0]` fallback bug fixed above);
+      one loading/empty/error-state test per app.
+- [x] A standalone Playwright suite at [`e2e/`](e2e/README.md) — its own
+      backend (port 8020, disposable SQLite, `AUTH_MODE=dev`) and both real
+      Vite dev servers, signing in via `?dev=<subject>` with no Firebase UI
+      involved. Four specs, run and verified green (not just written):
+      family switching between the seeded Sharma/Iyer families as
+      `dual-caregiver`, an invitation created and accepted across two
+      browser contexts, a senior-linked invitation landing on the right
+      person instead of `seniors[0]`, and zero-family onboarding. Not part
+      of any CI pipeline — none exists yet — and not meant to run alongside
+      a developer's own `run.py` (same frontend ports).
 
 ## Documentation
 

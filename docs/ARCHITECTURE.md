@@ -202,21 +202,27 @@ Store metadata in PostgreSQL and binary content in object storage. This includes
 Use short-lived signed URLs or authenticated streaming. Never expose a permanent
 public bucket for health-related files.
 
-## Push notifications - implemented, provider not configured
+## Push notifications - registration built, provider not configured
 
 The interface, the retry classification, the invalid-token revocation, the
-per-device attempt records and the audit trail all exist and are tested.
+per-device attempt records and the audit trail all exist and are tested. Both
+apps now register for push too: a Settings toggle (opt-in, not automatic)
+requests permission, registers `public/firebase-messaging-sw.js`, gets an FCM
+token, and calls `POST /devices`, re-registering silently on every load once
+permission is already granted.
 
 - `FCM_PROVIDER=fake` records what would have been sent without calling anyone.
   It is refused in staging and production by configuration.
 - `FCM_PROVIDER=firebase` sends through FCM HTTP v1 and needs real service
   account credentials, which have not been created.
 
-So **no push has ever reached a real device**. The Parent App does not register
-for push either: it has no service worker, so there is no token to register.
-Every notification therefore still reaches somebody only when their app is
-open - which is why every notification row carries an explicit `channel`, and
-an `in_app` row is never described as delivered.
+So **no push has ever reached a real device** — registration completes and a
+`RegisteredDevice` row is stored, but `FCM_PROVIDER=firebase` still needs a
+real service-account key and Web Push (VAPID) certificate from the Firebase
+console before anything is actually sent. Every notification therefore still
+reaches somebody only when their app is open - which is why every
+notification row carries an explicit `channel`, and an `in_app` row is never
+described as delivered.
 
 ## Environments
 

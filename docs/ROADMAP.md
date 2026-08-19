@@ -56,9 +56,11 @@ migrations, load seed data, call `/health`, and execute the test suite.
 
 ## Phase 2 - identity and permissions
 
-- [ ] Create Firebase projects/configuration for local or staging use.
-- [x] Implement Firebase ID-token verification in FastAPI (untested against a
-      real project until one exists; `AUTH_MODE=dev` covers local work).
+- [x] Create Firebase project/configuration for local use (`gamira-9415f`); a
+      separate staging project is still needed before deployment.
+- [x] Implement Firebase ID-token verification in FastAPI. Verified against a
+      real project, 2026-08-19: Google and email/password sign-in work in
+      both apps, alongside `AUTH_MODE=dev` for local multi-window testing.
 - [x] Create internal `users`, `families`, `family_memberships` and `senior_profiles` tables.
 - [x] Implement `GET /api/v1/me`.
 - [x] Implement family creation.

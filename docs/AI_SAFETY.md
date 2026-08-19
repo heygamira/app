@@ -66,6 +66,7 @@ Only when Gamira proposed it herself (`confirm_when_unasked`):
 
 - `create_reminder`
 - `complete_reminder`
+- `tell_family`
 
 Asking for an everyday routine out loud *is* the consent for it, and a dialog in
 front of somebody's own request is a hurdle in front of their own words — worst
@@ -101,20 +102,138 @@ There is no tool for any of these. Not a tool that refuses — no tool:
 - Add or edit a medication, an emergency contact, a health reading or a care
   record
 - Claim a health reading is medically safe
-- Cancel, suppress, acknowledge or resolve an SOS
+- Acknowledge, resolve or suppress an alert
 - Add a family member
 - Reveal another user's or family's information
 - Make a purchase
-- Raise, escalate or close an alert — including the after-call review, which
-  can ask for a `family_update` notification and nothing else
+- Raise or escalate an alert of any kind — including the after-call review,
+  which can ask for a `family_update` notification and nothing else, and
+  including the wellbeing check below, where the escalation is a rule about
+  elapsed time with no model anywhere near it
 
 `test_ai_live.py::test_the_catalogue_exposes_no_general_purpose_tool` asserts the
 catalogue contains no name matching `http`, `fetch`, `url`, `sql`, `query`,
 `exec`, `file`, `endpoint` or `shell`, and none of the forbidden mutations.
 
-Acknowledging, resolving or cancelling an alert with `ActorType.AI` raises
+Acknowledging or resolving an alert with `ActorType.AI` raises
 `PermissionDenied` in `app/services/alerts.py` — not a configuration option, not
-a role, no code path.
+a role, no code path. **Cancelling has one narrow exception**, described in full
+under *Ending an emergency* below.
+
+## Telling the family something ordinary — implemented
+
+Between "nothing happened" and an emergency there is almost everything anybody
+would actually want their family to know: a headache since this morning, a bad
+night, a sore knee, feeling low. Until `tell_family` there was no path for it.
+Saying "I have a headache" could become an SOS, which it is not, or it could
+wait for the after-call review — which only sends anything if the model said
+out loud that it would, only once the conversation has ended, and only when the
+worker reaches the job. The commonest thing a companion is for arrived late or
+not at all.
+
+`tell_family` writes a `family_update` notification and a timeline entry. What
+it is not, structurally rather than by instruction:
+
+- **Not an alert.** No `Alert` row, so no severity, no escalation, no
+  acknowledge, no resolve — there is no lifecycle for it to enter. Asserted by
+  `test_tell_family.py::test_it_raises_no_alert`.
+- **Not urgent.** In-app only, `push=False`. The urgent path is an alert, and
+  Gamira cannot raise one.
+- **Not hers to decide.** `confirm_when_unasked`, so a message she proposes is
+  confirmed first — and the confirmation reads out the message itself, not
+  "tell your family something?", because nobody can agree to a sentence they
+  have not heard.
+
+The sentence is the model's, and that is the point: it has to be able to say
+what they actually said. The persona constrains it to their words and forbids a
+cause, a diagnosis or advice; the schema caps it at 300 characters. What the
+model cannot do is decide whether it goes at all.
+
+## Ending an emergency — implemented
+
+Acknowledging an alert means somebody has promised to go and look. Resolving it
+means somebody has decided it is over. Neither is a thing an assistant can be,
+and both still raise `PermissionDenied` for `ActorType.AI`.
+
+Cancelling is a different act: it is the person the alert is *about* saying
+they are alright. Refusing that left somebody who pressed SOS by accident — or
+whose countdown ran out while they were fetching their glasses — with no way to
+take it back from their own phone, and reaching a button is the exact thing an
+SOS says they may not be able to do.
+
+So `alert_service.cancel_own_by_voice` exists, and every restriction on it is
+in that one function rather than in its callers:
+
+- **Only their own.** The alert's `senior_profile_id` must be the speaker's own
+  profile, or it raises `alert_not_yours`. A voice can withdraw its own
+  emergency and no other.
+- **Only one still open.** A resolved alert is somebody else's conclusion and
+  is not the speaker's to undo.
+- **Only after a spoken confirmation.** `cancel_my_sos` sets
+  `requires_confirmation`, so the backend authors the sentence and the person
+  has to answer it.
+- **The row survives.** Status becomes `cancelled` with the reason on it and an
+  `AlertEvent` carrying `actor_type=ai` and `via: live_voice`, so the trail
+  says the person decided and the assistant carried it out.
+- **The family is told.** A `family_update` goes out saying it was cancelled
+  and why. A red alert that silently disappears is worse for a family than the
+  false alarm was — they are left wondering whether they imagined it, or
+  whether it was cancelled by whatever is wrong.
+
+Before the countdown finishes, none of this applies: nothing has been sent, so
+`cancel_sos_countdown` is a **client** tool that closes a dialog and needs no
+confirmation at all.
+
+Tested by `test_sos_voice_cancel.py`, which is mostly about the walls:
+`::test_a_voice_cannot_cancel_somebody_elses_alert`,
+`::test_a_voice_cannot_undo_somebody_elses_conclusion`,
+`::test_acknowledge_and_resolve_still_refuse_the_assistant`,
+`::test_the_alert_survives_being_cancelled`,
+`::test_a_refused_cancellation_leaves_the_escalation_running`.
+
+## Wellbeing checks — implemented
+
+A watch decides one of its own limits was crossed. Gamira asks the person how
+they are. A rule decides what happens if the answer is bad or never comes. The
+seam between those three is the safety property, and it is why this is safe to
+build at all.
+
+`POST /seniors/{id}/device-flags` now opens a `WellbeingCheck` row alongside the
+family notice it already sent. Before, the flag was a notification and nothing
+else, so the one outcome worth catching — a flagged reading followed by silence
+— was invisible.
+
+What the model can do is `answer_wellbeing_check`, which takes `alright` or
+`not_alright` and no id: the check is resolved from the session's own person, so
+there is nothing to invent or misdirect. It is told, in the persona, to report
+what they *said* rather than what it inferred, and **not to call it at all** if
+nobody answered — silence is handled by something that is not guessing.
+
+What no model can do is escalate. `JobType.WELLBEING_CHECK_ESCALATE` runs on
+elapsed time (`wellbeing_check_grace_minutes`, default 10) and a stored answer.
+It raises `AlertType.WELLBEING_CHECK` at `AlertSeverity.HIGH` with
+`raised_by_user_id = None` — nobody raised it, and putting somebody's name on it
+would be a small lie.
+
+It is **not** a quieter SOS, and the difference is defended in three places: a
+separate `AlertType`, a separate wording entry in `ALERT_WORDING`, and an amber
+treatment in the dashboard that never uses the red overlay or the looping
+alarm. A watch on a bedside table leaves its band most nights; if that arrived
+wearing the red alarm, a family would learn within a week to dismiss the red
+alarm, and the one that matters is the one they would stop looking at.
+
+The alert reports the **silence**, which is a fact, and never the reading, which
+is not ours to interpret. "Gamira could not reach them to ask" and "Gamira asked
+and got no answer" are stored and worded separately, because a phone that was
+put down and a person who did not answer a direct question are different things.
+The disclaimer *"Gamira has not assessed the reading"* is appended in code
+rather than being part of an optional string.
+
+Tested by `test_wellbeing_checks.py`, including
+`::test_nobody_answering_raises_a_softer_alert_not_an_sos`,
+`::test_the_alert_never_claims_anything_about_the_reading`,
+`::test_unreachable_and_unanswered_are_told_apart` and
+`::test_the_catalogue_has_no_way_to_raise_this`.
 
 ## Memory — implemented
 
@@ -194,11 +313,28 @@ that waited overnight is not a slightly different notice.
 This is safe precisely because nothing she volunteers is urgent. The urgent
 path is an alert, and she cannot raise one.
 
-The Parent App applies the same courtesy to itself: `lib/useProactive.js` says
-nothing out loud outside 08:00–21:00 local, says each thing at most once a day,
-and never opens a microphone — it speaks through the device's own
-`speechSynthesis`. A session that started itself would mean the microphone
-turning on uninvited in somebody's home, which this app does not do.
+The Parent App applies the same courtesy to itself: `lib/useProactive.js`
+volunteers nothing outside 08:00–21:00 local and says each thing at most once a
+day.
+
+It now speaks through the Live API rather than the browser's
+`speechSynthesis`. That was a real trade and it is worth writing down. The old
+way opened no microphone at all, which was the safer shape — but it spoke in a
+different voice from the one the person had been talking to, could not be
+answered, and left "yes, I've taken it" with nowhere to go. A companion that
+announces things is not a companion.
+
+What replaces it keeps the important half of that property. The session opens
+with `autoStream: false`, so **nothing is sent from the room until Gamira has
+finished her sentence**; the microphone opens only on `turnComplete`, for a
+20-second window, and the session closes itself if nobody answers. So the
+common case costs one spoken sentence and no open microphone, and a session
+that opened a microphone before saying why still cannot happen.
+
+The brief she is given is built by the app from what is already on the person's
+screen — a dose name and a time — and is bracketed, so the persona knows it is
+the app speaking and not the person. She words it; she is not given a script,
+and she is not given anything the screen was not already showing.
 
 ## Openness — implemented
 
@@ -211,6 +347,27 @@ The persona's promise is "say so to them first, openly", and openly has to
 survive the conversation ending: somebody should be able to check what was said
 about them without asking anybody. Tested by
 `test_ai_suggestions.py::test_the_person_can_read_what_was_sent_to_their_family`.
+
+## Speculation — implemented
+
+The wake-word detector pre-connects on a *maybe* so a real "Gamira" is answered
+at once rather than after a second of silence. Most of those guesses are wrong,
+by design — so what matters is what a wrong one costs.
+
+It costs a minted ephemeral token, a `Conversation` row and a `LiveSession`
+row. It used to also queue a job to *read back* that conversation, because
+`close_live_session` was missing the guard `expire_stale_sessions` had; and the
+only ceiling on how many could be opened was a constant in browser JavaScript,
+which is not a ceiling at all. Now:
+
+- an abandoned guess queues no review — there is nothing to read back;
+- `live_provisional_per_hour` caps guesses on the server, separately from
+  `live_sessions_per_hour`, so being mis-heard can never stop somebody actually
+  talking to her;
+- the pre-connect threshold is 0.75 rather than 0.40. It is still well short of
+  the 0.94 it takes to wake, so the trick still works.
+
+Tested by `test_ai_speculation.py`.
 
 ## Retention — implemented
 
@@ -365,6 +522,7 @@ enforcement is structural rather than textual:
 | A schema violation is not retried forever | `test_ai_summaries.py::test_a_schema_violation_is_not_retried` |
 | Manual SOS succeeds while the model is unavailable | `test_ai_outage.py::test_a_manual_sos_works_with_the_ai_down` |
 | An assistant cannot end an alert | `test_alerts.py::test_an_assistant_can_never_end_an_alert` |
+| An ordinary worry reaches the family without becoming an emergency | `test_tell_family.py::test_saying_they_are_unwell_reaches_the_family`, `::test_it_raises_no_alert`, `::test_gamira_suggesting_it_has_to_be_agreed_to` |
 | A rejected confirmation mutates nothing | `test_ai_tools.py::test_rejecting_a_confirmation_changes_nothing` |
 | A failing tool does not end the session | `test_ai_tools.py::test_one_failing_call_does_not_fail_the_batch_or_the_session` |
 | No error response leaks internals | `test_ai_tools.py::test_no_error_response_carries_a_traceback_or_internals` |

@@ -150,7 +150,15 @@ None of these exist. Photo upload in both apps is still disabled because of it.
 - ✅ `POST /alerts/{alert_id}/acknowledge`
 - ✅ `POST /alerts/{alert_id}/resolve`
 - ✅ `POST /alerts/{alert_id}/cancel` — requires a reason; only the raiser or a
-  member with write access
+  member with write access. An assistant reaches this only through the one
+  narrow voice path described in `docs/AI_SAFETY.md`, which is scoped to the
+  speaker's own open alert and still tells the family.
+- ✅ `GET /seniors/{senior_id}/wellbeing-checks` — questions a device flag
+  has left owed, and how they were answered. Any active member, including
+  the cared-for person themselves
+- ✅ `POST /wellbeing-checks/{check_id}/answer` — `{alright: bool}`. The
+  tap equivalent of answering Gamira out loud, for anybody who cannot or
+  would rather not speak
 - ✅ `GET /seniors/{senior_id}/emergency-contacts`
 - ✅ `POST /seniors/{senior_id}/emergency-contacts`
 - ✅ `PATCH /emergency-contacts/{contact_id}`
