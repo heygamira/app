@@ -61,3 +61,15 @@ htmlcov/
 
 # Every run writes its console output here, kept for the last few runs.
 logs/
+
+# Terraform: state carries secret values in plaintext, and *.tfvars is where
+# gemini_api_key/fcm_credentials_json actually get filled in (see
+# infra/terraform/terraform.tfvars.example, which is NOT ignored by this).
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+crash.log
+crash.*.log

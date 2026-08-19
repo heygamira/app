@@ -1,0 +1,20 @@
+# Copy to terraform.tfvars (already gitignored — see .gitignore) and fill in.
+# Never commit the real file: gemini_api_key and fcm_credentials_json are
+# secrets, and project_id/firebase_project_id are worth keeping out of a
+# public diff even though they're not secret by themselves.
+
+project_id           = "gamira-staging-XXXXXX"
+region                = "asia-south1"
+environment           = "staging"
+cors_origins          = "https://staging.gamira.online,https://dashboard-staging.gamira.online"
+firebase_project_id   = "gamira-staging-XXXXXX"
+
+# The first apply can leave these as empty strings and use gcloud/console to
+# rotate real values in after — Secret Manager holds whatever is here, and a
+# secret version can be added out of band without another `terraform apply`.
+gemini_api_key        = ""
+fcm_credentials_json  = ""
+
+# Leave backend_image at its placeholder default until the first image is
+# actually pushed to Artifact Registry (see README.md's ordering) — Cloud Run
+# will run the Google-provided hello image until then, which is expected.
