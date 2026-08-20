@@ -314,7 +314,7 @@ export default function Reminders() {
     suggestions.length === 0;
 
   return (
-    <div className="space-y-5 select-none min-h-[calc(100vh-9rem)]" {...swipe}>
+    <div className="space-y-5 select-none min-h-[calc(100dvh-9rem)]" {...swipe}>
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-foreground">Reminders</h1>

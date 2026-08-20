@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getToken, onMessage } from 'firebase/messaging';
+import { Capacitor } from '@capacitor/core';
+import { FirebaseMessaging } from '@capacitor-firebase/messaging';
 import { firebaseEnabled, messaging } from '@/lib/firebase';
 import { gamira } from '@/api/gamiraClient';
 
@@ -24,33 +26,58 @@ function getOrCreateInstallId() {
   }
 }
 
+// Capacitor's permission states ('granted' | 'denied' | 'prompt' |
+// 'prompt-with-rationale') don't match the web Notification API's
+// ('granted' | 'denied' | 'default') that the rest of this hook — and
+// Settings.jsx's toggle — already speak, so every native permission read
+// goes through this.
+function mapNativePermission(receive) {
+  if (receive === 'granted') return 'granted';
+  if (receive === 'denied') return 'denied';
+  return 'default';
+}
+
 /**
- * Registers this browser for push delivery, and re-registers it silently on
+ * Registers this device for push delivery, and re-registers it silently on
  * every mount once permission has already been granted — the backend's own
  * `POST /devices` docstring calls that "safe to call on every app start."
+ *
+ * On native Android, registration goes through `@capacitor-firebase/messaging`
+ * (real FCM) rather than the web Push API: a Capacitor WebView can run the
+ * web path (it has Service Worker/PushManager support), but that path is
+ * unreliable once the app is backgrounded or killed — no browser process is
+ * left to wake it. SOS delivery in that state relies on FCM reaching native
+ * code directly; see android's GamiraFirebaseMessagingService.
  *
  * `onForegroundMessage` fires for a message that arrives while this tab is
  * focused: FCM never runs the service worker's background handler for that
  * case, so a focused tab has to notice on its own. Callers pass in whatever
  * their existing refresh function is (e.g. `useAlerts()`'s `reload`) rather
- * than this hook inventing its own notification UI.
+ * than this hook inventing its own notification UI. Native has no equivalent
+ * wiring — the SSE stream in `useAlerts.js` already reloads on any family
+ * event while the app is foregrounded, for every notification type, not
+ * just push-carried ones.
  *
  * @param {{onForegroundMessage?: () => void}} [options]
  */
 export function usePushRegistration({ onForegroundMessage } = {}) {
-  const supported =
-    firebaseEnabled &&
-    Boolean(messaging) &&
-    Boolean(import.meta.env.VITE_FIREBASE_VAPID_KEY) &&
-    typeof navigator !== 'undefined' &&
-    'serviceWorker' in navigator &&
-    typeof window !== 'undefined' &&
-    'PushManager' in window;
+  const isNative = Capacitor.isNativePlatform();
+
+  const supported = isNative
+    ? firebaseEnabled
+    : firebaseEnabled &&
+      Boolean(messaging) &&
+      Boolean(import.meta.env.VITE_FIREBASE_VAPID_KEY) &&
+      typeof navigator !== 'undefined' &&
+      'serviceWorker' in navigator &&
+      typeof window !== 'undefined' &&
+      'PushManager' in window;
 
   const [installId] = useState(getOrCreateInstallId);
-  const [permission, setPermission] = useState(
-    typeof Notification !== 'undefined' ? Notification.permission : 'default'
-  );
+  const [permission, setPermission] = useState(() => {
+    if (isNative) return 'default'; // resolved async by the mount effect below
+    return typeof Notification !== 'undefined' ? Notification.permission : 'default';
+  });
   // idle -> registering -> registered, or error at any point along the way.
   const [status, setStatus] = useState('idle');
   const [error, setError] = useState(null);
@@ -63,27 +90,13 @@ export function usePushRegistration({ onForegroundMessage } = {}) {
     setStatus('registering');
     setError(null);
     try {
-      const swParams = new URLSearchParams({
-        apiKey: import.meta.env.VITE_FIREBASE_API_KEY || '',
-        authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || '',
-        projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || '',
-        storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || '',
-        messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || '',
-        appId: import.meta.env.VITE_FIREBASE_APP_ID || '',
-      });
-      const registration = await navigator.serviceWorker.register(
-        `/firebase-messaging-sw.js?${swParams}`
-      );
-      const token = await getToken(messaging, {
-        vapidKey: import.meta.env.VITE_FIREBASE_VAPID_KEY,
-        serviceWorkerRegistration: registration,
-      });
+      const token = isNative ? await getNativeToken() : await getWebToken();
       if (!token) {
-        throw new Error('The browser did not return a push token.');
+        throw new Error('The device did not return a push token.');
       }
       await gamira.devices.register({
         install_id: installId,
-        platform: 'web',
+        platform: isNative ? 'android' : 'web',
         push_token: token,
         locale: navigator.language,
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -95,11 +108,21 @@ export function usePushRegistration({ onForegroundMessage } = {}) {
     } finally {
       registeringRef.current = false;
     }
-  }, [supported, installId]);
+  }, [supported, installId, isNative]);
 
   const enable = useCallback(async () => {
-    if (!supported || typeof Notification === 'undefined') return;
+    if (!supported) return;
     try {
+      if (isNative) {
+        const { receive } = await FirebaseMessaging.requestPermissions();
+        const mapped = mapNativePermission(receive);
+        setPermission(mapped);
+        if (mapped === 'granted') {
+          await runRegistration();
+        }
+        return;
+      }
+      if (typeof Notification === 'undefined') return;
       const result = await Notification.requestPermission();
       setPermission(result);
       if (result === 'granted') {
@@ -111,31 +134,66 @@ export function usePushRegistration({ onForegroundMessage } = {}) {
       setStatus('error');
       setError(err?.message || 'Could not request notification permission.');
     }
-  }, [supported, runRegistration]);
+  }, [supported, runRegistration, isNative]);
 
   // Silent re-registration: permission was already granted on a previous
-  // visit, so this repeats the flow with no dialog — `requestPermission()`
-  // resolves immediately with the existing decision when one already exists,
-  // it never re-prompts.
+  // visit/install, so this repeats the flow with no dialog — neither
+  // `checkPermissions()` nor `requestPermission()` re-prompts once a
+  // decision already exists.
   useEffect(() => {
-    if (supported && permission === 'granted') {
+    if (!supported) return;
+    if (isNative) {
+      FirebaseMessaging.checkPermissions()
+        .then(({ receive }) => {
+          const mapped = mapNativePermission(receive);
+          setPermission(mapped);
+          if (mapped === 'granted') runRegistration();
+        })
+        .catch(() => {});
+      return;
+    }
+    if (permission === 'granted') {
       runRegistration();
     }
     // Deliberately only on mount (and if `supported` only becomes true once
     // Firebase finishes initializing): a fresh grant is `enable()`'s job, not
     // this effect's, so `permission` and `runRegistration` are excluded from
     // the dependency list on purpose.
-  }, [supported]);
+  }, [supported, isNative]);
 
-  // Foreground delivery: a focused tab never gets `onBackgroundMessage`.
+  // Foreground delivery on the web: a focused tab never gets
+  // `onBackgroundMessage`. Native has no equivalent — see the hook doc above.
   useEffect(() => {
-    if (!supported || !messaging) return undefined;
+    if (isNative || !supported || !messaging) return undefined;
     return onMessage(messaging, () => {
       onForegroundMessage?.();
     });
-  }, [supported, onForegroundMessage]);
+  }, [isNative, supported, onForegroundMessage]);
 
-  return { supported, permission, status, error, enable };
+  return { supported, permission, status, error, enable, refresh: runRegistration };
+}
+
+async function getWebToken() {
+  const swParams = new URLSearchParams({
+    apiKey: import.meta.env.VITE_FIREBASE_API_KEY || '',
+    authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || '',
+    projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || '',
+    storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || '',
+    messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || '',
+    appId: import.meta.env.VITE_FIREBASE_APP_ID || '',
+  });
+  const registration = await navigator.serviceWorker.register(
+    `/firebase-messaging-sw.js?${swParams}`
+  );
+  return getToken(messaging, {
+    vapidKey: import.meta.env.VITE_FIREBASE_VAPID_KEY,
+    serviceWorkerRegistration: registration,
+  });
+}
+
+async function getNativeToken() {
+  const { token } = await FirebaseMessaging.getToken();
+  return token;
 }
 
 export default usePushRegistration;

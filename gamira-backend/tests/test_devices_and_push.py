@@ -124,6 +124,13 @@ async def test_a_push_reaches_a_registered_device(
     assert "SOS" in push_provider.sent[0].message.title
     # The payload is structural: an id and a type, never a health value.
     assert set(push_provider.sent[0].message.data) >= {"notification_id", "type"}
+    # SOS is sent data-only so it reaches native code (and can raise a
+    # full-screen alarm) in every app state, not just while foregrounded —
+    # and the title/body travel in `data` so the native side can render
+    # without a network round-trip.
+    assert push_provider.sent[0].message.data_only is True
+    assert push_provider.sent[0].message.data["title"]
+    assert push_provider.sent[0].message.data["body"]
 
     row = (
         await session.execute(
@@ -335,6 +342,63 @@ async def test_error_classification_covers_the_documented_codes():
     assert classify(None, 404) is DeliveryAttemptStatus.TOKEN_INVALID
     assert classify(None, 503) is DeliveryAttemptStatus.RETRYABLE
     assert classify(None, 400) is DeliveryAttemptStatus.PERMANENT
+
+
+async def test_a_data_only_message_omits_the_notification_block(monkeypatch):
+    """A `notification` key makes FCM auto-display before our code runs.
+
+    That is fine for an ordinary alert, but it is exactly what defeats a
+    locked-phone SOS alarm: the native side never gets to raise its own
+    full-screen intent. This asserts the real payload FirebasePushProvider
+    sends to FCM has no `notification` key when `data_only=True`, and still
+    has one when it is not.
+    """
+    import httpx
+
+    from app.notifications.provider import FirebasePushProvider, PushMessage
+
+    settings = get_settings_for_test()
+    provider = FirebasePushProvider(settings)
+    monkeypatch.setattr(provider, "_access_token", _fake_access_token)
+
+    captured: list[dict] = []
+    real_async_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        captured.append(_json.loads(request.content))
+        return httpx.Response(200, json={"name": "projects/x/messages/1"})
+
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kwargs: real_async_client(
+            transport=httpx.MockTransport(handler), **kwargs
+        ),
+    )
+
+    await provider.send(
+        token="a-token",
+        message=PushMessage(title="SOS", body="", data={"type": "sos"}, data_only=True),
+    )
+    await provider.send(
+        token="a-token",
+        message=PushMessage(title="Update", body="hi", data={"type": "family_update"}),
+    )
+
+    assert "notification" not in captured[0]["message"]
+    assert captured[1]["message"]["notification"] == {"title": "Update", "body": "hi"}
+
+
+def get_settings_for_test():
+    from app.core.config import Settings
+
+    return Settings(fcm_project_id="test-project", fcm_provider="firebase")
+
+
+async def _fake_access_token() -> str:
+    return "fake-access-token"
     # An unfamiliar failure is retried rather than dropped: losing a medication
     # reminder to an unrecognised string is the worse outcome.
     assert classify("SOMETHING_NEW") is DeliveryAttemptStatus.RETRYABLE
@@ -365,3 +429,6 @@ async def test_a_medication_reminder_is_pushed_at_normal_priority(
     for sent in push_provider.sent:
         if "Metformin" in sent.message.title:
             assert sent.message.high_priority is False
+            # Only SOS/SOS_ESCALATION go data-only; every other type keeps
+            # the FCM `notification` block so the OS can auto-display it.
+            assert sent.message.data_only is False

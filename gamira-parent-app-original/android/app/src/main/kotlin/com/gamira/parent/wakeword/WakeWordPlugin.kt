@@ -94,15 +94,29 @@ class WakeWordPlugin : Plugin() {
         call.resolve(JSObject().put("listening", false))
     }
 
+    /**
+     * A Gemini Live session wants the microphone. `getUserMedia` is not the
+     * way it gets it: this device's WebView cannot open the microphone at
+     * all (confirmed directly — `NotReadableError: Could not start audio
+     * source` even on a page that never touched the wake-word service), so
+     * the voice session instead taps this service's own already-open
+     * `AudioRecord` and receives raw chunks as `audio` events, decoded and
+     * forwarded to it by `nativeEngine.js`.
+     *
+     * Starts the service if it is not already running — a mic-button tap
+     * with the wake word never armed still needs to work.
+     */
     @PluginMethod
-    fun pause(call: PluginCall) {
-        WakeWordBridge.pause()
+    fun beginAudioTap(call: PluginCall) {
+        WakeWordService.start(context)
+        WakeWordBridge.beginAudioTap()
         call.resolve()
     }
 
+    /** The voice session ended; go back to listening for the wake word. */
     @PluginMethod
-    fun resume(call: PluginCall) {
-        WakeWordBridge.resume()
+    fun endAudioTap(call: PluginCall) {
+        WakeWordBridge.endAudioTap()
         call.resolve()
     }
 

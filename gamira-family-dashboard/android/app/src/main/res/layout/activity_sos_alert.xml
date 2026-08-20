@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#C0142020"
+    android:gravity="center"
+    android:orientation="vertical"
+    android:padding="32dp">
+
+    <TextView
+        android:id="@+id/sos_kicker"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="12dp"
+        android:text="EMERGENCY SOS"
+        android:textAllCaps="true"
+        android:textColor="#FFFFFF"
+        android:textSize="14sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/sos_title"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="8dp"
+        android:gravity="center"
+        android:textColor="#FFFFFF"
+        android:textSize="26sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/sos_body"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="24dp"
+        android:gravity="center"
+        android:textColor="#F0FFFFFF"
+        android:textSize="16sp" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="32dp"
+        android:gravity="center"
+        android:paddingLeft="16dp"
+        android:paddingRight="16dp"
+        android:text="Gamira has shown this to your family inside the app. It has not called anyone and has not contacted emergency services."
+        android:textColor="#D8FFFFFF"
+        android:textSize="13sp" />
+
+    <Button
+        android:id="@+id/sos_open_button"
+        android:layout_width="260dp"
+        android:layout_height="56dp"
+        android:layout_marginBottom="12dp"
+        android:backgroundTint="#FFFFFF"
+        android:text="Open Gamira"
+        android:textColor="#C0142020"
+        android:textStyle="bold" />
+
+    <Button
+        android:id="@+id/sos_silence_button"
+        android:layout_width="260dp"
+        android:layout_height="56dp"
+        android:background="@android:color/transparent"
+        android:text="Silence"
+        android:textColor="#FFFFFF" />
+
+</LinearLayout>

@@ -3,6 +3,9 @@ import { useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import { Download, FileBarChart } from "lucide-react";
 import { jsPDF } from "jspdf";
+import { Capacitor } from "@capacitor/core";
+import { Filesystem, Directory } from "@capacitor/filesystem";
+import { Share } from "@capacitor/share";
 import { useAuth } from "@/lib/AuthContext";
 import { useSwipeNav } from "@/lib/useSwipeNav";
 import { healthApi, medicinesApi, timelineApi, toMember } from "@/api/dashboardData";
@@ -100,7 +103,7 @@ export default function Reports() {
     [selected, scopedMeds, scopedReadings, scopedEvents, members, medicines, days],
   );
 
-  const exportPDF = () => {
+  const exportPDF = async () => {
     const doc = new jsPDF();
     let y = 20;
     doc.setFontSize(18);
@@ -153,7 +156,21 @@ export default function Reports() {
       y += 5;
     });
 
-    doc.save(`gamira-report-${selected ? selected.name.replace(/\s+/g, "-").toLowerCase() : "family"}.pdf`);
+    const fileName = `gamira-report-${selected ? selected.name.replace(/\s+/g, "-").toLowerCase() : "family"}.pdf`;
+
+    if (Capacitor.isNativePlatform()) {
+      // A browser-style download doesn't work inside a WebView — there's no
+      // Downloads folder to drop it into. Write it to the app's cache and
+      // hand it to the native share sheet instead, same as any other native
+      // app's "export" action.
+      const base64 = doc.output("datauristring").split(",")[1];
+      await Filesystem.writeFile({ path: fileName, data: base64, directory: Directory.Cache });
+      const { uri } = await Filesystem.getUri({ path: fileName, directory: Directory.Cache });
+      await Share.share({ title: "Gamira Report", url: uri });
+      return;
+    }
+
+    doc.save(fileName);
   };
 
   return (

@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { AlertCircle, Bell, Check, SkipForward } from 'lucide-react';
+import { Haptics, ImpactStyle } from '@capacitor/haptics';
 import GamiraSectionHeader from '@/components/gamira/GamiraSectionHeader';
 import GamiraCard from '@/components/gamira/GamiraCard';
 import { useT } from '@/lib/i18n';
@@ -26,6 +27,7 @@ export default function Reminders() {
       if (outcome === 'taken') await dosesApi.markTaken(dose.id);
       else await dosesApi.markSkipped(dose.id);
       await reload();
+      Haptics.impact({ style: ImpactStyle.Medium }).catch(() => {});
       setActionError(null);
     } catch (e) {
       setActionError(e.message);

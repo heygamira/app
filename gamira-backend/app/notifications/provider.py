@@ -46,6 +46,12 @@ class PushMessage:
     # Lets a provider drop an older undelivered message about the same thing.
     collapse_key: str | None = None
     high_priority: bool = False
+    # FCM auto-displays any message that carries a "notification" block once
+    # the app is backgrounded or killed, before our own code ever runs. SOS
+    # alerts need to reach native code in every app state so it can raise a
+    # full-screen, sound-playing alarm itself — that only happens for a
+    # data-only message.
+    data_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -246,7 +252,11 @@ class FirebasePushProvider:
         payload: dict[str, Any] = {
             "message": {
                 "token": token,
-                "notification": {"title": message.title, "body": message.body},
+                **(
+                    {}
+                    if message.data_only
+                    else {"notification": {"title": message.title, "body": message.body}}
+                ),
                 "data": dict(message.data),
                 "android": {
                     "priority": "high" if message.high_priority else "normal",

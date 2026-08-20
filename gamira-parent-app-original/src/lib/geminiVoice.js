@@ -872,7 +872,13 @@ export function startVoiceSession({
       // Borrowed where the wake-word engine already opened one. That removes
       // the permission check, the device open and two context resumes from the
       // path between saying "Gamira" and being heard.
-      if (!stream) {
+      //
+      // Skipped entirely when `audioSource` was handed over instead: that is
+      // the native engine's raw-PCM tap (see nativeEngine.js), which is the
+      // *only* way this app gets microphone audio on a platform where
+      // `getUserMedia` itself does not work. Calling it anyway here would
+      // fail before ever reaching the `audioSource` branch below.
+      if (!stream && !audioSource) {
         stream = await navigator.mediaDevices.getUserMedia({
           audio: {
             channelCount: 1,
@@ -896,6 +902,51 @@ export function startVoiceSession({
       if (stopped) return;
 
       inputRate = Math.round(captureCtx.sampleRate);
+
+      // Mic capture starts here, before the network round trip below, not
+      // after it. It used to run last — attached only once `ai.live.connect`
+      // had already resolved — which cost nothing on the web engine (a
+      // worklet node clipped onto a stream that was already open is instant)
+      // but was a real, avoidable delay on the native engine, where
+      // `audioSource.subscribe` means physically closing the wake-word's
+      // `AudioRecord` and reopening it in `VOICE_COMMUNICATION` mode — see
+      // `WakeWordService.runRecorderSession`, measured at a few hundred ms.
+      // Stacked after the token mint and WebSocket handshake, that was pure
+      // added latency between the wake word and Gemini actually hearing
+      // anything. Started here instead, it overlaps with that round trip for
+      // free: `sendAudio` already drops or buffers whatever arrives before
+      // the socket is open (see its docblock), so nothing downstream needed
+      // to change to make early chunks safe.
+      if (audioSource) {
+        // The wake-word engine already taps this stream; a second worklet on
+        // the same graph would only duplicate the work.
+        unsubscribeAudio = audioSource.subscribe((chunk) => {
+          sendAudio(floatToPcm16(chunk), inputRate);
+        });
+      } else {
+        workletUrl = URL.createObjectURL(
+          new Blob([CAPTURE_WORKLET], { type: 'application/javascript' })
+        );
+        await captureCtx.audioWorklet.addModule(workletUrl);
+        if (stopped) return;
+
+        sourceNode = captureCtx.createMediaStreamSource(stream);
+        workletNode = new AudioWorkletNode(captureCtx, 'pcm-capture');
+        workletNode.port.onmessage = (event) => {
+          if (stopped) return;
+          sendAudio(new Int16Array(event.data), inputRate);
+        };
+        sourceNode.connect(workletNode);
+
+        // The worklet produces no output, but Chrome only pulls from nodes that
+        // reach the destination. A muted gain node keeps the graph alive without
+        // routing the microphone back to the speakers.
+        sinkNode = captureCtx.createGain();
+        sinkNode.gain.value = 0;
+        workletNode.connect(sinkNode);
+        sinkNode.connect(captureCtx.destination);
+      }
+
       const { GoogleGenAI, Modality } = await import('@google/genai');
       if (stopped) return;
 
@@ -1042,39 +1093,6 @@ export function startVoiceSession({
       if (openingBrief) {
         onStatus('working');
         notify(openingBrief);
-      }
-
-      // Mic -> Live API. `sendAudio` decides whether each chunk goes out now,
-      // is held for a socket that has not opened, or is dropped because a
-      // confirmation dialog is on screen.
-      if (audioSource) {
-        // The wake-word engine already taps this stream; a second worklet on
-        // the same graph would only duplicate the work.
-        unsubscribeAudio = audioSource.subscribe((chunk) => {
-          sendAudio(floatToPcm16(chunk), inputRate);
-        });
-      } else {
-        workletUrl = URL.createObjectURL(
-          new Blob([CAPTURE_WORKLET], { type: 'application/javascript' })
-        );
-        await captureCtx.audioWorklet.addModule(workletUrl);
-        if (stopped) return;
-
-        sourceNode = captureCtx.createMediaStreamSource(stream);
-        workletNode = new AudioWorkletNode(captureCtx, 'pcm-capture');
-        workletNode.port.onmessage = (event) => {
-          if (stopped) return;
-          sendAudio(new Int16Array(event.data), inputRate);
-        };
-        sourceNode.connect(workletNode);
-
-        // The worklet produces no output, but Chrome only pulls from nodes that
-        // reach the destination. A muted gain node keeps the graph alive without
-        // routing the microphone back to the speakers.
-        sinkNode = captureCtx.createGain();
-        sinkNode.gain.value = 0;
-        workletNode.connect(sinkNode);
-        sinkNode.connect(captureCtx.destination);
       }
     } catch (err) {
       fail(err);

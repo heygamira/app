@@ -2,6 +2,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useS
 import { onIdTokenChanged } from 'firebase/auth';
 import { gamira } from '@/api/gamiraClient';
 import { auth as firebaseAuth, firebaseEnabled } from '@/lib/firebase';
+import { cancelAllDoseNotifications } from '@/lib/localDoseNotifications';
 
 const AuthContext = createContext(null);
 
@@ -119,6 +120,7 @@ export const AuthProvider = ({ children }) => {
   );
 
   const logout = useCallback((shouldRedirect = true) => {
+    cancelAllDoseNotifications().catch(() => {});
     gamira.auth.logout();
     setUser(null);
     setFamilies([]);

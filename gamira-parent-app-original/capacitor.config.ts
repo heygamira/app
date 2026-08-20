@@ -13,6 +13,14 @@ const config: CapacitorConfig = {
     FirebaseAuthentication: {
       providers: ['google.com'],
     },
+    SplashScreen: {
+      launchAutoHide: false,
+      androidSplashResourceName: 'splash',
+      androidScaleType: 'CENTER_CROP',
+    },
+    StatusBar: {
+      overlaysWebView: false,
+    },
   },
 };
 

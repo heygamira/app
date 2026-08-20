@@ -2,7 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <application
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
@@ -42,6 +42,14 @@
             android:name=".wakeword.WakeWordService"
             android:exported="false"
             android:foregroundServiceType="microphone" />
+
+        <!-- A push that arrives while the app is fully killed lands before
+             usePushRegistration.js has ever run createChannel() — this is
+             what routes that cold-start notification to the real channel
+             instead of Android's auto-created "Miscellaneous" one. -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="gamira-reminders" />
     </application>
 
     <!-- Permissions -->
@@ -53,6 +61,13 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <!-- Only to show the "Listening for Gamira" notification the service is
-         required to post while it holds the microphone in the background. -->
+         required to post while it holds the microphone in the background,
+         and for push/local dose-reminder notifications on Android 13+. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Dose-reminder local notifications are exact, time-based alerts — the
+         app's core function — which is what qualifies it for USE_EXACT_ALARM
+         without the user-facing "Alarms & reminders" settings toggle that a
+         plain SCHEDULE_EXACT_ALARM grant would otherwise require. -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
 </manifest>

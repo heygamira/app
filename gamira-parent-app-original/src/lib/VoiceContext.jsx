@@ -8,6 +8,7 @@ import { useAuth } from '@/lib/AuthContext';
 import { langCode, useI18n } from '@/lib/i18n';
 import { seniors as seniorsApi, wellbeingChecks as checksApi } from '@/api/gamiraClient';
 import VoiceConfirmDialog from '@/components/gamira/VoiceConfirmDialog';
+import { syncDoseNotifications } from '@/lib/localDoseNotifications';
 
 /**
  * Gamira's voice, for the whole app rather than for one screen.
@@ -83,6 +84,10 @@ export default function VoiceProvider() {
         setContacts(s.emergency_contacts);
         setWellbeingChecks(s.wellbeing_checks);
         setError(null);
+        // Fire-and-forget: a native-only best-effort sync, never allowed to
+        // delay or fail this screen's own state update. See AGENTS.md —
+        // reminders must keep working with no AI/network dependency at all.
+        syncDoseNotifications(s.doses, self?.timezone).catch(() => {});
       } catch (e) {
         setError(e.message);
       } finally {

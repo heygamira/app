@@ -183,7 +183,7 @@ export default function AIAssistant() {
   };
 
   return (
-    <div className="flex flex-col h-[calc(100vh-9rem)]">
+    <div className="flex flex-col h-[calc(100dvh-9rem)]">
       <PageHeader title="Ask about today" subtitle="Answered from your family's records" backTo="/" />
 
       {members.length > 1 && (

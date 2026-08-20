@@ -260,6 +260,8 @@ async def deliver_push(
                 collapse_key=notification.dedupe_key[:64],
                 high_priority=notification.type
                 in (NotificationType.SOS, NotificationType.SOS_ESCALATION),
+                data_only=notification.type
+                in (NotificationType.SOS, NotificationType.SOS_ESCALATION),
             ),
         )
         session.add(
@@ -345,10 +347,18 @@ async def _devices_already_delivered(
 
 
 def _push_data(notification: NotificationDelivery) -> dict[str, str]:
-    """Only what the app needs to open the right screen."""
+    """Only what the app needs to open the right screen.
+
+    ``title``/``body`` are duplicated here (already sent in the FCM
+    ``notification`` block for every other type) so that a data-only SOS
+    message — see ``PushMessage.data_only`` — carries enough for the native
+    Android side to render its own full-screen alarm without a network call.
+    """
     data = {
         "notification_id": str(notification.id),
         "type": notification.type.value,
+        "title": notification.title,
+        "body": notification.body or "",
     }
     if notification.related_entity_type:
         data["entity_type"] = notification.related_entity_type

@@ -3,6 +3,9 @@
 // Every screen goes through this module. Pages must not call fetch directly:
 // authentication, the error shape and the family/senior context all live here.
 
+import { Capacitor } from '@capacitor/core';
+import { Preferences } from '@capacitor/preferences';
+
 const API_BASE = import.meta.env.VITE_GAMIRA_API_URL || '/api/v1';
 const TOKEN_KEY = 'gamira_access_token';
 
@@ -35,6 +38,15 @@ const storage = {
       else localStorage.removeItem(TOKEN_KEY);
     } catch {
       /* private browsing */
+    }
+    // Capacitor's Preferences plugin is a thin wrapper over Android
+    // SharedPreferences ("CapacitorStorage", same key) — mirroring the token
+    // there lets the native SOS lock-screen alarm's "Silence" button make an
+    // authenticated acknowledge call without duplicating the whole auth
+    // stack in Kotlin/Java. See android's SosAlertActivity/AlertAcknowledger.
+    if (Capacitor.isNativePlatform()) {
+      if (token) Preferences.set({ key: TOKEN_KEY, value: token });
+      else Preferences.remove({ key: TOKEN_KEY });
     }
   },
 };

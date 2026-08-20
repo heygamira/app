@@ -30,7 +30,7 @@ export default function TopNav({ title }) {
   }, [isAuthenticated]);
 
   return (
-    <header className="sticky top-0 z-30 glass border-b border-border/60">
+    <header className="sticky top-0 z-30 glass border-b border-border/60 pt-[env(safe-area-inset-top)]">
       <div className="mx-auto max-w-md flex items-center justify-between px-5 h-16">
         <div className="flex flex-col">
           <span className="text-[19px] font-bold tracking-tight text-foreground">{title || "Gamira"}</span>

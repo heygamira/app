@@ -1,8 +1,11 @@
 package com.gamira.parent.wakeword
 
 import android.content.Context
+import android.util.Base64
 import android.util.Log
 import org.json.JSONObject
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 /**
  * The one detector, shared by the foreground service and the Capacitor
@@ -19,9 +22,22 @@ object WakeWordBridge {
     @Volatile var isListening: Boolean = false
         internal set
 
-    /** Set from JS via `pause()` while a voice session is live; Gamira's own
-     * reply is in the room, and the detector should not try to wake on it. */
-    @Volatile var paused: Boolean = false
+    /**
+     * True while a Gemini Live session, not the wake-word model, owns the
+     * microphone stream.
+     *
+     * This phone's WebView cannot open `getUserMedia` at all — verified
+     * directly: a fresh page, before this service ever touches the
+     * microphone, still gets `NotReadableError: Could not start audio
+     * source`, while native `AudioRecord` opens fine at the same moment. So
+     * rather than let the voice session try (and fail) to open its own
+     * stream, the *same* AudioRecord this service already has open just
+     * switches what it does with each chunk: score it against the wake-word
+     * model, or hand it to `geminiVoice.js` as the conversation's audio
+     * input. One microphone, one mode flag, never two concurrent opens to
+     * race or fail.
+     */
+    @Volatile var audioTapActive: Boolean = false
         internal set
 
     private var listener: ((String, JSONObject) -> Unit)? = null
@@ -45,28 +61,27 @@ object WakeWordBridge {
         return loaded
     }
 
+    /**
+     * A voice session wants the microphone. Scoring stops — resetting the
+     * trigger/features/gate so nothing stale is waiting when scoring resumes
+     * — and the capture loop starts handing chunks to [emitAudioChunk]
+     * instead. The AudioRecord itself is untouched.
+     */
+    fun beginAudioTap() {
+        detector?.reset()
+        audioTapActive = true
+    }
+
+    /** The voice session ended; go back to listening for the wake word. */
+    fun endAudioTap() {
+        audioTapActive = false
+        detector?.reset()
+    }
+
     fun setOptions(thresholdOffset: Double?, preconnectThreshold: Double?) {
         val d = detector ?: return
         thresholdOffset?.let { d.setThresholdOffset(it) }
         preconnectThreshold?.let { d.setPreconnectThreshold(it) }
-    }
-
-    /**
-     * Stop scoring but keep every resource warm — the microphone, the ONNX
-     * session, the notification. Used while a voice session is live: Gamira's
-     * own reply is in the room and should not wake her again.
-     *
-     * Resets the trigger/features/gate immediately, matching the web worker's
-     * `pause` handler: held open rather than torn down, but with no stale
-     * state left over for when scoring resumes.
-     */
-    fun pause() {
-        paused = true
-        detector?.reset()
-    }
-
-    fun resume() {
-        paused = false
     }
 
     fun onListeningChanged(value: Boolean) {
@@ -77,6 +92,25 @@ object WakeWordBridge {
     fun onMicLost(message: String) {
         isListening = false
         emit("error", JSONObject().put("message", message))
+    }
+
+    /**
+     * Hand one chunk of mono float32 audio to the JS side, while
+     * [audioTapActive] is true.
+     *
+     * Base64 of raw little-endian float32 bytes — the same layout
+     * `new Float32Array(arrayBuffer)` reads on the web side, so
+     * `nativeEngine.js` decodes it into exactly the `Float32Array` shape
+     * `geminiVoice.js`'s `audioSource.subscribe` callback already expects
+     * from the *web* wake-word engine's own worklet tap. Nothing downstream
+     * of that callback needs to know which one produced the chunk.
+     */
+    fun emitAudioChunk(buffer: FloatArray, length: Int) {
+        if (length <= 0) return
+        val bytes = ByteBuffer.allocate(length * 4).order(ByteOrder.LITTLE_ENDIAN)
+        for (i in 0 until length) bytes.putFloat(buffer[i])
+        val encoded = Base64.encodeToString(bytes.array(), Base64.NO_WRAP)
+        emit("audio", JSONObject().put("pcm", encoded).put("samples", length))
     }
 
     fun onEvent(event: WakeEvent) {

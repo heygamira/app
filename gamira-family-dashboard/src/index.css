@@ -66,6 +66,10 @@
     @apply bg-background text-foreground font-body antialiased;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    /* Without this, pulling past the top/bottom of a scroll shows the
+       WebView's native rubber-band/glow overscroll — it reads as "a
+       website," not the app. */
+    overscroll-behavior: none;
   }
 
   /* No visible scrollbars. This is a phone screen: the scrollbar track eats a

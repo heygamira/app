@@ -1,6 +1,13 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { Capacitor } from '@capacitor/core';
+import { StatusBar, Style } from '@capacitor/status-bar';
 
 const STORAGE_KEY = 'gamira_theme';
+
+// Matches --background in index.css for each theme (hsl(210 40% 98%) light,
+// hsl(222 47% 7%) dark) — the status bar background should read as part of
+// the page, not a separate native chrome color.
+const STATUS_BAR_BACKGROUND = { light: '#F8FAFC', dark: '#0B1120' };
 
 /**
  * @typedef {{
@@ -44,6 +51,13 @@ export function ThemeProvider({ children }) {
       window.localStorage.setItem(STORAGE_KEY, theme);
     } catch {
       // ignore
+    }
+    if (Capacitor.isNativePlatform()) {
+      // Style.Dark = light icons (for a dark background), Style.Light = dark
+      // icons (for a light background) — named for the icon color, not the
+      // background, so this pairing looks backwards but is correct.
+      StatusBar.setStyle({ style: theme === 'dark' ? Style.Dark : Style.Light });
+      StatusBar.setBackgroundColor({ color: STATUS_BAR_BACKGROUND[theme] });
     }
   }, [theme]);
 

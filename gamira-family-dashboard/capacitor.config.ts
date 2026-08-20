@@ -13,6 +13,12 @@ const config: CapacitorConfig = {
     FirebaseAuthentication: {
       providers: ['google.com'],
     },
+    // Held open past Capacitor's own load event until the auth check
+    // resolves (see App.jsx's SplashGate) — otherwise the splash hides into a
+    // flash of an unauthenticated/empty screen before the real one is ready.
+    SplashScreen: {
+      launchAutoHide: false,
+    },
   },
 };
 

@@ -1,10 +1,12 @@
-import { lazy, Suspense } from 'react';
+import { lazy, Suspense, useEffect } from 'react';
+import { Capacitor } from '@capacitor/core';
+import { SplashScreen } from '@capacitor/splash-screen';
 import { Toaster } from '@/components/ui/toaster';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { queryClientInstance } from '@/lib/query-client';
 import { BrowserRouter as Router, Route, Routes } from 'react-router-dom';
 import PageNotFound from './lib/PageNotFound';
-import { AuthProvider } from '@/lib/AuthContext';
+import { AuthProvider, useAuth } from '@/lib/AuthContext';
 import ScrollToTop from './components/ScrollToTop';
 import ProtectedRoute from '@/components/ProtectedRoute';
 import RedirectToLogin from '@/components/RedirectToLogin';
@@ -12,6 +14,19 @@ import RequireFamily from '@/components/RequireFamily';
 import Layout from '@/components/gamira/Layout';
 import { ThemeProvider } from '@/lib/ThemeContext';
 import Login from '@/pages/Login';
+
+// Native only: capacitor.config.ts sets launchAutoHide false so the splash
+// stays up past Capacitor's own load event, through the first paint of an
+// unauthenticated/empty screen, until the real auth state is known.
+function SplashGate() {
+  const { authChecked } = useAuth();
+  useEffect(() => {
+    if (authChecked && Capacitor.isNativePlatform()) {
+      SplashScreen.hide();
+    }
+  }, [authChecked]);
+  return null;
+}
 
 // Lazy-loaded: everything behind sign-in. Login stays a static import so the
 // one public route has no extra network round trip; every other page is its
@@ -106,6 +121,7 @@ const AppRoutes = () => (
 function App() {
   return (
     <AuthProvider>
+      <SplashGate />
       <QueryClientProvider client={queryClientInstance}>
         <Router>
           <ScrollToTop />

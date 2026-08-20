@@ -2,6 +2,7 @@ import { useCallback, useEffect, useImperativeHandle, useRef, useState } from 'r
 import { createPortal } from 'react-dom';
 import { AlertCircle, Check, Loader2, Phone } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { Haptics, ImpactStyle } from '@capacitor/haptics';
 
 /**
  * The SOS button.
@@ -101,6 +102,7 @@ export default function GamiraSOSButton({
   const [alertId, setAlertId] = useState(null);
 
   const begin = useCallback(() => {
+    Haptics.impact({ style: ImpactStyle.Heavy }).catch(() => {});
     setPhase('ask');
     setError('');
     setAlertId(null);
@@ -129,6 +131,7 @@ export default function GamiraSOSButton({
   };
 
   const confirm = useCallback(async () => {
+    Haptics.impact({ style: ImpactStyle.Heavy }).catch(() => {});
     setCountdown(null);
     const raise = handlersRef.current.onAlert;
     if (!raise) {

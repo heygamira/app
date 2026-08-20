@@ -5,6 +5,8 @@ import { BrowserRouter as Router, Route, Routes } from 'react-router-dom';
 import PageNotFound from './lib/PageNotFound';
 import { AuthProvider } from '@/lib/AuthContext';
 import ScrollToTop from './components/ScrollToTop';
+import AndroidBackButtonEffect from '@/components/AndroidBackButtonEffect';
+import NativePushNavigation from '@/components/NativePushNavigation';
 import ProtectedRoute from '@/components/ProtectedRoute';
 import RedirectToLogin from '@/components/RedirectToLogin';
 import RequireLinkedSenior from '@/components/RequireLinkedSenior';
@@ -77,6 +79,8 @@ function App() {
       <QueryClientProvider client={queryClientInstance}>
         <Router>
           <ScrollToTop />
+          <AndroidBackButtonEffect />
+          <NativePushNavigation />
           <I18nProvider>
             <AppRoutes />
           </I18nProvider>
