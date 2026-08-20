@@ -34,7 +34,19 @@ export function useFirebaseAuth() {
   // came by.
   const signInWithGoogle = useCallback(async () => {
     if (Capacitor.isNativePlatform()) {
-      await FirebaseAuthentication.signInWithGoogle();
+      try {
+        await FirebaseAuthentication.signInWithGoogle();
+      } catch (err) {
+        // Credential Manager — the modern API the line above uses — isn't
+        // available on every device; phones with an outdated or missing
+        // Credential Manager module in Google Play Services reject it
+        // outright rather than falling back on their own. The plugin still
+        // ships its older Google Sign-In flow for exactly this case, so
+        // retry with that instead of leaving the person stuck. Anything
+        // else (they closed the sheet, no network) should still surface.
+        if (!/credential manager/i.test(err?.message || '')) throw err;
+        await FirebaseAuthentication.signInWithGoogle({ useCredentialManager: false });
+      }
       const { token } = await FirebaseAuthentication.getIdToken();
       await signIn(token);
       return;
