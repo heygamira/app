@@ -41,6 +41,10 @@ resource "google_cloud_run_v2_service" "api" {
   location = var.region
   ingress  = "INGRESS_TRAFFIC_ALL" # the public API surface; see docs/ANDROID_AND_CLOUD.md's "API address" note on why a public URL is fine
 
+  # Same reasoning as cloud_sql.tf: staging needs to be freely
+  # destroyable/recreatable while iterating; production should not.
+  deletion_protection = var.environment == "production"
+
   template {
     service_account = google_service_account.runtime.email
 
@@ -157,6 +161,8 @@ resource "google_cloud_run_v2_service" "worker" {
   location = var.region
   ingress  = "INGRESS_TRAFFIC_INTERNAL_ONLY"
 
+  deletion_protection = var.environment == "production"
+
   template {
     service_account = google_service_account.runtime.email
 
@@ -210,17 +216,19 @@ resource "google_cloud_run_v2_service" "worker" {
         }
       }
 
+      # Startup probe only — Cloud Run rejects a TCP-socket liveness_probe
+      # outright ("Cloud Run currently does not support TCP socket in
+      # liveness probe"), and the worker has no HTTP server to probe
+      # instead. The startup probe alone is enough for Cloud Run to know
+      # the container came up; ongoing health is the container process
+      # itself staying alive, same as any other bare-poller deployment.
       startup_probe {
-        tcp_socket {}
+        tcp_socket {
+          port = 8080
+        }
         initial_delay_seconds = 2
         period_seconds        = 3
         failure_threshold     = 10
-      }
-
-      liveness_probe {
-        tcp_socket {}
-        period_seconds     = 30
-        failure_threshold  = 3
       }
     }
 

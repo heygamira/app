@@ -25,6 +25,11 @@ resource "google_sql_database_instance" "gamira" {
 
   settings {
     tier              = var.db_tier
+    # This project's org policy defaults new Cloud SQL instances to the
+    # ENTERPRISE_PLUS edition, which requires db-perf-optimized-N-* tier
+    # names instead of the classic db-custom-N-M naming var.db_tier uses —
+    # pin the edition explicitly rather than switch tier naming schemes.
+    edition           = "ENTERPRISE"
     availability_type = var.db_availability_type
     disk_autoresize   = true
     disk_type         = "PD_SSD"
@@ -42,10 +47,16 @@ resource "google_sql_database_instance" "gamira" {
     }
 
     ip_configuration {
-      # No public IP: reachable only through the Cloud SQL Auth Proxy
-      # (Cloud Run's built-in connector) or a VPC connector, never the
-      # open internet.
-      ipv4_enabled = false
+      # GCP now requires at least one connectivity path (public IP, private
+      # IP via VPC peering, or PSC) at instance-creation time — there's no
+      # VPC/private-service-access setup in this stack, so this must be
+      # true. This does not mean the database is open to the internet: no
+      # authorized_networks are listed below, so the firewall rejects direct
+      # connections from any IP. Cloud Run's actual connection goes through
+      # the Cloud SQL Auth Proxy (the /cloudsql socket mount in cloud_run.tf),
+      # which authenticates via IAM and mutual TLS over Google's internal
+      # network, not a raw connection to this public IP.
+      ipv4_enabled = true
     }
 
     insights_config {

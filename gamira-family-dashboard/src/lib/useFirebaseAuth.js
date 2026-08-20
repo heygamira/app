@@ -4,6 +4,8 @@ import {
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
 } from 'firebase/auth';
+import { Capacitor } from '@capacitor/core';
+import { FirebaseAuthentication } from '@capacitor-firebase/authentication';
 import { auth, googleProvider, firebaseEnabled } from '@/lib/firebase';
 import { useAuth } from '@/lib/AuthContext';
 
@@ -22,10 +24,23 @@ export function useFirebaseAuth() {
     [signIn],
   );
 
-  const signInWithGoogle = useCallback(
-    () => withIdToken(signInWithPopup(auth, googleProvider)),
-    [withIdToken],
-  );
+  // `signInWithPopup` cannot work inside a Capacitor WebView — Google
+  // blocks OAuth there ("disallowed_useragent") — so the native app goes
+  // through the platform's own Credential Manager / Google Sign-In SDK
+  // instead, via `@capacitor-firebase/authentication`. That plugin signs
+  // into a *native* Firebase Auth session; `getIdToken()` reads the token
+  // back out of it, and from there it's the same `signIn(idToken)` the web
+  // path already uses — the backend does not know or care which route it
+  // came by.
+  const signInWithGoogle = useCallback(async () => {
+    if (Capacitor.isNativePlatform()) {
+      await FirebaseAuthentication.signInWithGoogle();
+      const { token } = await FirebaseAuthentication.getIdToken();
+      await signIn(token);
+      return;
+    }
+    return withIdToken(signInWithPopup(auth, googleProvider));
+  }, [withIdToken, signIn]);
 
   const signInWithEmail = useCallback(
     (email, password) => withIdToken(signInWithEmailAndPassword(auth, email, password)),

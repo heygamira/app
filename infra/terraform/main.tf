@@ -22,6 +22,7 @@ resource "google_project_service" "required" {
     "sql-component.googleapis.com",
     "secretmanager.googleapis.com",
     "artifactregistry.googleapis.com",
+    "cloudbuild.googleapis.com",
     "storage.googleapis.com",
     "iam.googleapis.com",
     "cloudresourcemanager.googleapis.com",

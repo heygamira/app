@@ -8,10 +8,10 @@ or production (see ``Settings.model_post_init``).
 from __future__ import annotations
 
 import functools
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 AppEnv = Literal["local", "test", "staging", "production"]
 AuthMode = Literal["firebase", "dev"]
@@ -43,7 +43,12 @@ class Settings(BaseSettings):
     database_pool_recycle_seconds: int = 1800
     database_echo: bool = False
 
-    cors_origins: list[str] = Field(
+    # NoDecode: pydantic-settings otherwise tries to JSON-decode any complex-
+    # typed env var before _split_origins below ever runs, so a plain
+    # comma-separated value (what .env.example documents, and what
+    # infra/terraform sets) fails to parse. This opts the field out of that
+    # default JSON decoding so the validator sees the raw string instead.
+    cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:5173", "http://localhost:5174"]
     )
 
@@ -171,7 +176,12 @@ class Settings(BaseSettings):
     @classmethod
     def _split_origins(cls, value: object) -> object:
         if isinstance(value, str):
-            return [item.strip() for item in value.split(",") if item.strip()]
+            stripped = value.strip()
+            if stripped.startswith("["):
+                import json
+
+                return json.loads(stripped)
+            return [item.strip() for item in stripped.split(",") if item.strip()]
         return value
 
     def model_post_init(self, __context: object) -> None:

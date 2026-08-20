@@ -71,5 +71,9 @@ logs/
 *.tfvars
 *.tfvars.json
 !*.tfvars.example
+# A saved plan is a local artifact, not source, and can echo attribute
+# values from *.tfvars into a binary file that would otherwise never be
+# committed.
+tfplan*
 crash.log
 crash.*.log

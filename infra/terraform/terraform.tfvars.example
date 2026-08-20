@@ -6,14 +6,19 @@
 project_id           = "gamira-staging-XXXXXX"
 region                = "asia-south1"
 environment           = "staging"
-cors_origins          = "https://staging.gamira.online,https://dashboard-staging.gamira.online"
+# https://localhost is the default WebView origin for a Capacitor Android
+# app (both the Family Dashboard and Parent App packages) — required for
+# either app's installed build to reach this API at all.
+cors_origins          = "https://staging.gamira.online,https://dashboard-staging.gamira.online,https://localhost"
 firebase_project_id   = "gamira-staging-XXXXXX"
 
-# The first apply can leave these as empty strings and use gcloud/console to
-# rotate real values in after — Secret Manager holds whatever is here, and a
-# secret version can be added out of band without another `terraform apply`.
-gemini_api_key        = ""
-fcm_credentials_json  = ""
+# Secret Manager rejects an empty-string payload outright, and Cloud Run's
+# containers reference these secrets' "latest" version to even start — so
+# the first apply needs a real placeholder, not an empty string. Use
+# gcloud/console to rotate real values in after; a secret version can be
+# added out of band without another `terraform apply`.
+gemini_api_key        = "REPLACE_WITH_REAL_GEMINI_API_KEY"
+fcm_credentials_json  = "{}"
 
 # Leave backend_image at its placeholder default until the first image is
 # actually pushed to Artifact Registry (see README.md's ordering) — Cloud Run

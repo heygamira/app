@@ -76,10 +76,13 @@ it for the reasoning and the manual verification that was done.
    `firebase_project_id` needs to be real before `terraform apply`, since
    `AUTH_MODE=firebase` refuses to start without it
    (`app/core/config.py`'s `model_post_init`).
-4. `cp terraform.tfvars.example terraform.tfvars` and fill it in. Leave
-   `gemini_api_key`/`fcm_credentials_json` empty for the first apply if you
-   don't have them yet — Secret Manager will hold empty strings, and you can
-   add a real secret version later without re-running `apply`.
+4. `cp terraform.tfvars.example terraform.tfvars` and fill it in. If you
+   don't have real `gemini_api_key`/`fcm_credentials_json` values yet, leave
+   the example's placeholder strings in place rather than empty strings —
+   Secret Manager rejects an empty payload, and Cloud Run's containers
+   reference these secrets' "latest" version just to start. Add the real
+   secret version later with `gcloud secrets versions add` without
+   re-running `apply`.
 5. `terraform init`, `terraform plan`, read the plan, `terraform apply`.
    This creates everything **except** a real backend image — `backend_image`
    defaults to Google's own hello-world image, so the API/worker services

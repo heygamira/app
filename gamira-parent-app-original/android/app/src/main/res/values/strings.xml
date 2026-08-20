@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Gamira</string>
+    <string name="title_activity_main">Gamira</string>
+    <string name="package_name">com.gamira.parent</string>
+    <string name="custom_url_scheme">com.gamira.parent</string>
+</resources>

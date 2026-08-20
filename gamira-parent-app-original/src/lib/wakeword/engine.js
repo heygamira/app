@@ -16,6 +16,7 @@
 
 import { loadWakeBundle } from './bundle.js';
 import { playSound } from './sounds.js';
+import { nativeWakeWordAvailable, startNativeWakeWordEngine } from './nativeEngine.js';
 
 const OUTPUT_RATE = 24_000;
 const TARGET_RATE = 16_000;
@@ -117,16 +118,26 @@ export function floatToPcm16(input) {
  * @param {number} [opts.thresholdOffset]
  * @param {number} [opts.preconnectThreshold]
  */
-export function startWakeWordEngine({
-  onDetect = () => {},
-  onMaybe = () => {},
-  onRelease = () => {},
-  onScore = () => {},
-  onReady = () => {},
-  onError = () => {},
-  thresholdOffset = 0,
-  preconnectThreshold = 0.4,
-} = {}) {
+export function startWakeWordEngine(opts = {}) {
+  // Inside the Capacitor app, the microphone lives in a native foreground
+  // service instead of this WebView — see `nativeEngine.js` for why: a
+  // WebView's audio is suspended the moment the screen locks, and a wake
+  // word detector that stops the moment you put the phone down is not one.
+  // The handle contract is identical either way, so nothing below this line,
+  // nor anything in `useWakeWord.js`, needs to know which one is running.
+  if (nativeWakeWordAvailable()) return startNativeWakeWordEngine(opts);
+
+  const {
+    onDetect = () => {},
+    onMaybe = () => {},
+    onRelease = () => {},
+    onScore = () => {},
+    onReady = () => {},
+    onError = () => {},
+    thresholdOffset = 0,
+    preconnectThreshold = 0.4,
+  } = opts;
+
   let stopped = false;
   let stream = null;
   let captureCtx = null;
